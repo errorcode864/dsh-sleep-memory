@@ -1,0 +1,5 @@
+node_modules/
+tmp/
+.DS_Store
+# 本地交接文档，不随仓库发布
+HANDOFF.md

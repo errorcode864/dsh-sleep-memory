@@ -1,0 +1,41 @@
+{
+  "name": "dsh-sleep-memory",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/errorcode864/dsh-sleep-memory.git"
+  },
+  "type": "module",
+  "description": "外置记忆库：为 Agent 提供跨会话的持久记忆——写入、BM25+扩散激活召回、睡眠期巩固与遗忘、显著情绪记忆与双分支自动注入。",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "README.md",
+    "README.en.md",
+    "icon.svg",
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale",
+    "smoke.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}
