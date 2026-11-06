@@ -211,7 +211,7 @@ Configuration errors throw at plugin load time (fail loud).
 ## Local verification
 
 ```sh
-node smoke.mjs   # a mocked ctx drives 67 behavior scenarios (M1 write/recall + M2 four-phase sleep + M3 spread recall + M4 injection/scoring + M5 card projection + M6 manage tool + M8 semantic expansion recall + M9 GUI Remote service + M10 time-window recall)
+node smoke.mjs   # a mocked ctx drives 73 behavior scenarios (M1 write/recall + M2 four-phase sleep + M3 spread recall + M4 injection/scoring + M5 card projection + M6 manage tool + M8 semantic expansion recall + M9 GUI Remote service + M10 time-window recall)
 ```
 
 ## Known limitations

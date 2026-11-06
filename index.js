@@ -709,6 +709,23 @@ function clusterBySimilarity(candidates, threshold) {
   return [...groups.values()]
 }
 
+/**
+ * 兼容新旧宿主的记忆删除接口：新版使用批量写入槽，rc.5 按顺序等待单条持久删除。
+ * 批量删除失败时直接抛出，避免在存储状态不明时降级重试。
+ * @param {MemoryTable} table records 表句柄
+ * @param {string[]} ids 待删除的记忆 id
+ * @returns {Promise<void>}
+ */
+async function deleteMemoryRecords(table, ids) {
+  if (typeof table.deleteMany === 'function') {
+    await table.deleteMany(ids)
+    return
+  }
+  for (const id of ids) {
+    await table.delete(id)
+  }
+}
+
 /** 一次睡眠整理的结构化报告；dryRun 时数值为「将要发生」的计划。 */
 /** @typedef {{sleptAt: number, dryRun: boolean, durationMs: number, recordsBefore: number, recordsAfter: number, decayedCount: number, consolidated: {deepId: string, members: string[], summaryPreview: string}[], consolidatedCount: number, archived: {id: string, gistPreview: string}[], archivedCount: number, deleted: {id: string, contentPreview: string, idleDays: number}[], deletedCount: number, edgesAdded: number, capacityLimited: boolean}} SleepReport */
 
@@ -922,10 +939,13 @@ async function runSleepCycle(table, cfg, options = {}) {
       }
     }
     report.decayedCount = decayedCount
+    const createdIds = new Set(newDeepIds)
     for (const [id, record] of finalOverwrite) {
-      await table.update(id, () => record)
+      // 新生成的 deep 记忆尚不存在，必须先 put；已有记录仍走 update，保留缺失记录保护。
+      if (createdIds.has(id)) await table.put(id, record)
+      else await table.update(id, () => record)
     }
-    if (doomedIds.length > 0) await table.deleteMany(doomedIds)
+    if (doomedIds.length > 0) await deleteMemoryRecords(table, doomedIds)
   }
 
   report.durationMs = Date.now() - startedAt
@@ -2152,7 +2172,7 @@ export function apply(ctx, config) {
           edgesRemoved += rec.edges.length - kept.length
           await table.update(id, (current) => ({ ...current, edges: current.edges.filter((edge) => !doomedIds.has(edge.target)), updatedAt: now }))
         }
-        await table.deleteMany([...doomedIds])
+        await deleteMemoryRecords(table, [...doomedIds])
         return {
           action: 'forget',
           id: target.id,
@@ -2388,4 +2408,4 @@ export function apply(ctx, config) {
 /** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, manageListMaxItems: number, manageListPreviewChars: number}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
 /** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number}[], supersededBy: string|null, gist: string|null}} MemoryRecord */
-/** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany(ids: string[]): Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */
+/** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */

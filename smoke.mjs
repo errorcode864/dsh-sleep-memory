@@ -6,19 +6,33 @@
 import assert from 'node:assert/strict'
 import { apply } from './index.js'
 
-/** 内存版 KvTable（镜像 storage-domain KvTable 真实接口：读同步 get/keys/entries/size、写异步；不暴露 .map，防回归）。 */
-function makeTable() {
+/** 内存版 KvTable：默认镜像 rc.5 接口，可选新版批量删除；缺失记录不能 update，读取返回快照迭代器。 */
+function makeTable({ batchDelete = false } = {}) {
   const map = new Map()
-  return {
+  const table = {
     get size() { return map.size },
     get(id) { return map.get(id) },
-    keys() { return map.keys() },
-    entries() { return [...map.entries()] },
+    keys() { return [...map.keys()][Symbol.iterator]() },
+    entries() { return [...map.entries()][Symbol.iterator]() },
     async put(id, value) { map.set(id, value) },
-    async update(id, updater) { map.set(id, updater(map.get(id))) },
-    async delete(id) { map.delete(id) },
-    async deleteMany(ids) { for (const id of ids) map.delete(id) },
+    async update(id, updater) {
+      if (!map.has(id)) throw new Error(`记忆记录不存在：${id}`)
+      const next = updater(map.get(id))
+      map.set(id, next)
+      return next
+    },
+    async delete(id) { return map.delete(id) },
   }
+  if (batchDelete) {
+    table.deleteMany = async (ids) => {
+      let removed = 0
+      for (const id of new Set(ids)) {
+        if (map.delete(id)) removed += 1
+      }
+      return removed
+    }
+  }
+  return table
 }
 
 const table = makeTable()
@@ -1258,4 +1272,123 @@ await assert.rejects(apiD.setConfig({ changes: { recallBudget: 7 } }), /config-e
 const GE = makeInstance({}, null, { get: () => ({ entries: () => [], configuration: () => [], edit: async () => {} }) })
 await assert.rejects(GE.provided.get('sleepMemoryApi').getConfig(), /entry-not-found/, '找不到 sleep-memory 行即 fail loud')
 
-console.log('SMOKE PASS: 67/67 场景通过')
+// 68. KvTable mock 对齐宿主：缺失记录不能 update，返回值和快照迭代器符合接口约定。
+const contractTable = makeTable()
+assert.equal(contractTable.deleteMany, undefined, '默认镜像 rc.5，不提供 deleteMany')
+await assert.rejects(contractTable.update('smm_absent', () => fixture('smm_absent')), /记忆记录不存在/)
+await contractTable.put('smm_contract', fixture('smm_contract'))
+const entrySnapshot = contractTable.entries()
+const keySnapshot = contractTable.keys()
+await contractTable.put('smm_later', fixture('smm_later'))
+assert.deepEqual([...entrySnapshot].map(([id]) => id), ['smm_contract'], 'entries 为调用时快照')
+assert.deepEqual([...keySnapshot], ['smm_contract'], 'keys 为调用时快照')
+assert.equal((await contractTable.update('smm_contract', (rec) => ({ ...rec, importance: 0.8 }))).importance, 0.8)
+assert.equal(await contractTable.delete('smm_contract'), true, '删除已有记录返回 true')
+assert.equal(await contractTable.delete('smm_contract'), false, '删除缺失记录返回 false')
+const batchContract = makeTable({ batchDelete: true })
+await batchContract.put('smm_batch', fixture('smm_batch'))
+assert.equal(await batchContract.deleteMany(['smm_batch', 'smm_batch', 'smm_absent']), 1, '批量删除按实际存在的唯一记录计数')
+
+// 69. 新版宿主的 forget 保留批量接口，级联只提交一次，不降级到逐条删除。
+const batchForgetTable = makeTable({ batchDelete: true })
+const batchForgetCalls = []
+const batchForgetDelete = batchForgetTable.deleteMany
+batchForgetTable.deleteMany = async (ids) => {
+  batchForgetCalls.push([...ids])
+  return batchForgetDelete(ids)
+}
+batchForgetTable.delete = async () => { throw new Error('新版宿主不应调用单条删除') }
+const batchForget = makeInstance({}, batchForgetTable)
+await batchForgetTable.put('smm_batch_parent', fixture('smm_batch_parent'))
+await batchForgetTable.put('smm_batch_child', fixture('smm_batch_child', { supersededBy: 'smm_batch_parent' }))
+await batchForgetTable.put('smm_batch_keep', fixture('smm_batch_keep'))
+const batchForgotten = await batchForget.manage.execute({ action: 'forget', id: 'smm_batch_parent' })
+assert.deepEqual(batchForgetCalls, [['smm_batch_parent', 'smm_batch_child']])
+assert.deepEqual(batchForgotten.forgotten, ['smm_batch_parent', 'smm_batch_child'])
+assert.deepEqual([...batchForgetTable.keys()], ['smm_batch_keep'], '无关记录保留')
+
+// 70. 新版宿主的睡眠遗忘也走批量接口；预演不调用任何删除方法。
+const batchSleepTable = makeTable({ batchDelete: true })
+const batchSleepCalls = []
+const batchSleepDelete = batchSleepTable.deleteMany
+batchSleepTable.deleteMany = async (ids) => {
+  batchSleepCalls.push([...ids])
+  return batchSleepDelete(ids)
+}
+batchSleepTable.delete = async () => { throw new Error('新版宿主不应调用单条删除') }
+const batchSleep = makeInstance({ dreamMaxCandidates: 0 }, batchSleepTable)
+for (const id of ['smm_batch_old1', 'smm_batch_old2']) {
+  await batchSleepTable.put(id, fixture(id, { layer: 'archive', strength: 0.05, lastAccessAt: Date.now() - 200 * DAY }))
+}
+const batchSleepPreview = await batchSleep.sleep.execute({ dryRun: true })
+assert.equal(batchSleepPreview.deletedCount, 2)
+assert.deepEqual(batchSleepCalls, [], '预演不落盘删除')
+assert.equal(batchSleepTable.size, 2)
+const batchSleepResult = await batchSleep.sleep.execute({})
+assert.deepEqual(batchSleepCalls, [['smm_batch_old1', 'smm_batch_old2']])
+assert.equal(batchSleepResult.deletedCount, 2)
+assert.equal(batchSleepTable.size, 0)
+
+// 71. 批量存储失败原样抛出，两个入口均不能降级重试，以免掩盖故障或扩大不确定状态。
+for (const action of ['forget', 'sleep']) {
+  const failingTable = makeTable({ batchDelete: true })
+  const storageError = new Error('模拟批量持久化失败')
+  let batchFailures = 0
+  let fallbackCalls = 0
+  failingTable.deleteMany = async () => { batchFailures += 1; throw storageError }
+  failingTable.delete = async () => { fallbackCalls += 1; return false }
+  const failingMemory = makeInstance({ dreamMaxCandidates: 0 }, failingTable)
+  await failingTable.put('smm_batch_fail', fixture('smm_batch_fail', {
+    layer: 'archive', strength: 0.05, lastAccessAt: Date.now() - 200 * DAY,
+  }))
+  const result = action === 'forget'
+    ? failingMemory.manage.execute({ action, id: 'smm_batch_fail' })
+    : failingMemory.sleep.execute({})
+  await assert.rejects(result, (err) => err === storageError, '存储异常必须保留')
+  assert.equal(batchFailures, 1)
+  assert.equal(fallbackCalls, 0, '批量接口存在但失败时不调用单条删除')
+  assert.ok(failingTable.get('smm_batch_fail'), '失败不得报告记忆已遗忘')
+  if (action === 'sleep') {
+    assert.equal((await failingMemory.sleep.execute({ dryRun: true })).dryRun, true, '失败后释放睡眠锁')
+  }
+}
+
+// 72. rc.5 级联按顺序等待持久删除完成，未落盘前不返回成功，也不并发提交后续记录。
+const legacyTable = makeTable()
+const legacyDelete = legacyTable.delete
+const legacyCalls = []
+let releaseLegacyDelete
+const legacyGate = new Promise((resolve) => { releaseLegacyDelete = resolve })
+legacyTable.delete = async (id) => {
+  legacyCalls.push(id)
+  if (id === 'smm_legacy_parent') await legacyGate
+  return legacyDelete(id)
+}
+const legacyMemory = makeInstance({}, legacyTable)
+await legacyTable.put('smm_legacy_parent', fixture('smm_legacy_parent'))
+await legacyTable.put('smm_legacy_child', fixture('smm_legacy_child', { supersededBy: 'smm_legacy_parent' }))
+let legacyFinished = false
+const legacyPending = legacyMemory.manage.execute({ action: 'forget', id: 'smm_legacy_parent' })
+legacyPending.then(() => { legacyFinished = true })
+await flushAsync()
+assert.deepEqual(legacyCalls, ['smm_legacy_parent'], '前一条完成后才删除下一条')
+assert.equal(legacyFinished, false, '必须等待持久化后才返回成功')
+assert.equal(legacyTable.size, 2)
+releaseLegacyDelete()
+assert.deepEqual((await legacyPending).forgotten, ['smm_legacy_parent', 'smm_legacy_child'])
+assert.deepEqual(legacyCalls, ['smm_legacy_parent', 'smm_legacy_child'])
+assert.equal(legacyTable.size, 0)
+
+// 73. rc.5 单条删除失败时立即中止，不能继续级联或返回成功。
+const legacyFailTable = makeTable()
+const legacyStorageError = new Error('模拟单条持久化失败')
+const legacyFailCalls = []
+legacyFailTable.delete = async (id) => { legacyFailCalls.push(id); throw legacyStorageError }
+const legacyFailMemory = makeInstance({}, legacyFailTable)
+await legacyFailTable.put('smm_legacy_fail', fixture('smm_legacy_fail'))
+await legacyFailTable.put('smm_legacy_fail_child', fixture('smm_legacy_fail_child', { supersededBy: 'smm_legacy_fail' }))
+await assert.rejects(legacyFailMemory.manage.execute({ action: 'forget', id: 'smm_legacy_fail' }), (err) => err === legacyStorageError)
+assert.deepEqual(legacyFailCalls, ['smm_legacy_fail'], '首次失败后不再提交后续删除')
+assert.equal(legacyFailTable.size, 2, '失败记录仍保留')
+
+console.log('SMOKE PASS: 73/73 场景通过')
