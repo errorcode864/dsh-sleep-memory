@@ -23,13 +23,13 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@errorcode864/dsh-sleep-memory',
+  id: 'dsh-sleep-memory',
   factory(require) {
     const React = require('react');
     const { useState, useMemo, useCallback, useEffect, useRef, useSyncExternalStore } = React;
     const h = React.createElement;
 
-    const PACKAGE_ID = '@errorcode864/dsh-sleep-memory';
+    const PACKAGE_ID = 'dsh-sleep-memory';
     const SLOT_ID = 'sleep-memory';
     const NS = 'sleep-memory';
 

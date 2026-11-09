@@ -1,6 +1,6 @@
 {
-  "name": "@errorcode864/dsh-sleep-memory",
-  "version": "0.3.0",
+  "name": "dsh-sleep-memory",
+  "version": "0.4.0",
   "scripts": {
     "test": "node smoke.mjs && node --test tests/*.test.mjs",
     "eval": "node eval.mjs",
@@ -9,9 +9,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/errorcode864/dsh-sleep-memory.git"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com/"
   },
   "type": "module",
   "description": "外置记忆库：为 Agent 提供跨会话的持久记忆——写入、BM25+扩散激活召回、睡眠期巩固与遗忘、显著情绪记忆与双分支自动注入。",

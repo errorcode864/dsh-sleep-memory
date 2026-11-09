@@ -102,15 +102,21 @@
 在 DSH 的「插件 → 添加插件 → 安装第三方插件」里输入包名：
 
 ```text
-@errorcode864/dsh-sleep-memory
+dsh-sleep-memory
 ```
 
-需要远端更新提示时，先完成首次发布和 profile 认证，详见
-[发布与迁移指南](docs/guides/package-updates.md)。
+命令行安装：
+
+```sh
+dsh plugin --profile <profile> add dsh-sleep-memory                # npm 包（推荐）
+dsh plugin --profile <profile> add errorcode864/dsh-sleep-memory#dist  # GitHub dist 分支
+```
+
+npm 包安装后，DSH 会在打开插件页或手动检查时自动提示新版本。
 
 **方式二：本地开发（link 安装）**
 
-profile 的依赖名和 `dsh.profile.bundles` 使用 `@errorcode864/dsh-sleep-memory`，
+profile 的依赖名和 `dsh.profile.bundles` 使用 `dsh-sleep-memory`，
 依赖值指向本地插件目录即可。`index.js` 改动经插件禁用/启用热重载；`client.js`
 改动刷新页面生效。
 

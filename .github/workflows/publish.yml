@@ -1,51 +1,122 @@
-name: 发布 GitHub Packages
+name: Release
+
+# A tag push starts the release: the maintainer bumps package.json and pushes
+# v<version>. The workflow packs once, publishes the same tree as
+# `<version>-dev.<run number>` under npm's `dev` tag so it can be tried at once,
+# runs the checks, writes the `dist` branch so a git install needs no build,
+# then promotes `<version>` as `latest` from the same tarball. npm trusted
+# publishing (OIDC) exchanges `id-token` for a one-time publish token, so no
+# npm secret is stored in the repository.
 
 on:
-  workflow_dispatch:
-  release:
-    types: [published]
+  push:
+    tags: ['v*']
 
 permissions:
-  contents: read
-  packages: write
+  contents: write
+  id-token: write
 
 concurrency:
-  group: 发布记忆插件
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: 验证并发布插件
+  release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: 检出源码
-        uses: actions/checkout@v7
-      - name: 配置 Node.js 和 GitHub Packages
-        uses: actions/setup-node@v7
+      - uses: actions/checkout@v7
         with:
-          node-version: '24'
-          registry-url: https://npm.pkg.github.com/
-          scope: '@errorcode864'
-      - name: 校验发布包和 Release 版本
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install --global npm@^11.5.1
+      - name: Check the tag names the package version
+        id: version
         run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs';
-          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
-          if (manifest.name !== '@errorcode864/dsh-sleep-memory'
-              || manifest.publishConfig?.registry !== 'https://npm.pkg.github.com/') {
-              throw new Error('发布包名或 Registry 配置不正确');
-          }
-          if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== `v${manifest.version}`) {
-              throw new Error('Release Tag 必须与 package.json 版本一致');
-          }
-          JS
-      - name: 执行回归测试
-        run: npm test
-      - name: 检查发布内容
-        run: npm pack --dry-run --ignore-scripts
-      - name: 发布到 GitHub Packages
-        run: npm publish --registry=https://npm.pkg.github.com/ --ignore-scripts
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error title=Release::tag ${GITHUB_REF_NAME} does not name package.json's version ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - run: npm ci || npm install
+      - name: Read what is already out
+        id: state
+        run: |
+          if npm view "${PKG}@${VERSION}" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+          if npm view "${PKG}@${VERSION}-dev.${GITHUB_RUN_NUMBER}" version > /dev/null 2>&1; then
+            echo "dev=published" >> "$GITHUB_OUTPUT"
+          else
+            echo "dev=" >> "$GITHUB_OUTPUT"
+          fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKG: dsh-sleep-memory
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Run regression tests
+        run: npm test
+      - name: Pack the release and its dev version
+        id: pack
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npm pack --ignore-scripts --pack-destination .debug
+          tarball=".debug/dsh-sleep-memory-${VERSION}.tgz"
+          devtarball=".debug/dsh-sleep-memory-${VERSION}-dev.${GITHUB_RUN_NUMBER}.tgz"
+          # Rewrite the version field inside the dev tarball so npm accepts it.
+          rm -rf .debug/dev-pkg && mkdir -p .debug/dev-pkg
+          tar -xzf "${tarball}" -C .debug/dev-pkg
+          node -e "
+            const f = '.debug/dev-pkg/package/package.json';
+            const m = JSON.parse(require('node:fs').readFileSync(f, 'utf8'));
+            m.version = '${VERSION}-dev.${GITHUB_RUN_NUMBER}';
+            require('node:fs').writeFileSync(f, JSON.stringify(m, null, 2) + '\n');
+          "
+          npm pack .debug/dev-pkg/package --ignore-scripts --pack-destination .debug
+          mv ".debug/dev-pkg/dsh-sleep-memory-${VERSION}-dev.${GITHUB_RUN_NUMBER}.tgz" "${devtarball}" 2>/dev/null || true
+          echo "release=${tarball}" >> "$GITHUB_OUTPUT"
+          echo "dev=${devtarball}" >> "$GITHUB_OUTPUT"
+      # Out at once, so the version can be installed and tried while the checks
+      # below run; a check that fails leaves the dev build where it is and
+      # promotes nothing.
+      - name: Publish the dev version
+        if: steps.state.outputs.published != 'true' && steps.state.outputs.dev == ''
+        run: npm publish "${{ steps.pack.outputs.dev }}" --access public --provenance --tag dev
+      - name: Write the dist branch
+        if: steps.state.outputs.published != 'true'
+        run: |
+          rm -rf dist-branch && mkdir dist-branch
+          tar -xzf "${{ steps.pack.outputs.release }}" -C dist-branch
+          cd dist-branch/package
+          git init -q
+          git checkout -q -b dist
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "dist: v${{ steps.version.outputs.version }}"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q --force origin dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish to npm
+        if: steps.state.outputs.published != 'true'
+        run: npm publish "${{ steps.pack.outputs.release }}" --access public --provenance
+      - name: Create the GitHub Release
+        if: steps.state.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          notes=$(mktemp)
+          printf '安装：`dsh-sleep-memory@%s`\n\n完整变更见 [更新日志](https://github.com/%s/blob/main/docs/guides/package-updates.md)。\n' "${VERSION}" "${GITHUB_REPOSITORY}" > "${notes}"
+          gh release view "v${VERSION}" > /dev/null 2>&1 \
+            && gh release edit "v${VERSION}" --notes-file "${notes}" \
+            || gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --notes-file "${notes}"
