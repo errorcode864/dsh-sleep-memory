@@ -11,6 +11,7 @@ source_of_truth: code-and-script
 
 - 当前功能入口见 [插件说明](../../README.md)。
 - [可靠记忆使用与验证](reliability.md)
+- [GitHub Packages 发布与远端更新](package-updates.md)
 - 实施范围见 [可靠性计划](../decisions/memory-reliability.md)。
 - [文档索引](../README.md)
 
@@ -21,5 +22,6 @@ source_of_truth: code-and-script
 
 | 类型 | 文档 | 状态 | 更新日期 |
 | --- | --- | --- | --- |
+| runbook | [GitHub Packages 发布与远端更新](package-updates.md) | active | 2026-11-09 |
 | guide | [可靠记忆使用与验证](reliability.md) | active | 2026-11-09 |
 <!-- DOCS-INDEX:END -->

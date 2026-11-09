@@ -1,0 +1,51 @@
+name: 发布 GitHub Packages
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: 发布记忆插件
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 验证并发布插件
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v7
+      - name: 配置 Node.js 和 GitHub Packages
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com/
+          scope: '@errorcode864'
+      - name: 校验发布包和 Release 版本
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (manifest.name !== '@errorcode864/dsh-sleep-memory'
+              || manifest.publishConfig?.registry !== 'https://npm.pkg.github.com/') {
+              throw new Error('发布包名或 Registry 配置不正确');
+          }
+          if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== `v${manifest.version}`) {
+              throw new Error('Release Tag 必须与 package.json 版本一致');
+          }
+          JS
+      - name: 执行回归测试
+        run: npm test
+      - name: 检查发布内容
+        run: npm pack --dry-run --ignore-scripts
+      - name: 发布到 GitHub Packages
+        run: npm publish --registry=https://npm.pkg.github.com/ --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -6,6 +6,7 @@ import { createHarness, fixture, flushTasks } from './harness.mjs'
 
 /** 执行真实 client 模块和 Remote 描述符；替身只提供宿主、React 生命周期。 */
 async function createClient(host) {
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     const components = new Map()
     const cells = new Map()
     let current
@@ -46,15 +47,31 @@ async function createClient(host) {
         locale: { bind: () => (key) => key, subscribe: () => () => {}, register: () => () => {} },
         slots: {
             inject: (_key, callback) => callback(),
-            register: (options, component) => { components.set(options.name, component); return () => {} },
+            register: (options, component) => {
+                if (options.name === 'plugins.bundle.config') {
+                    assert.equal(options.key, manifest.name, '配置槽必须使用安装包名')
+                }
+                components.set(options.name, component)
+                return () => {}
+            },
         },
         effect: (effect) => { const cleanup = effect(); if (typeof cleanup === 'function') cleanups.push(cleanup) },
-        get: (key) => key === 'remote' ? { $mount: async (definition) => { registrations.push(definition); return () => {} } }
+        get: (key) => key === 'remote' ? { $mount: async (definition) => {
+            assert.equal(definition.package, manifest.name, 'Remote 挂载必须使用安装包名')
+            for (const descriptor of definition.descriptors) {
+                assert.equal(descriptor.id, `${manifest.name}#${descriptor.namespace}/${descriptor.method}`, 'Remote 描述符必须属于安装包')
+            }
+            registrations.push(definition)
+            return () => {}
+        } }
             : key === 'remote.sleepMemoryApi' ? remote : undefined,
     }
     const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
     runInNewContext(source, {
-        window: { __ModuleLoader__: { load: ({ factory }) => factory(() => react).apply(context) } },
+        window: { __ModuleLoader__: { load: ({ id, factory }) => {
+            assert.equal(id, manifest.name, '客户端注册 ID 必须与安装包名一致')
+            return factory(() => react).apply(context)
+        } } },
         document: {
             getElementById: () => ({}),
             createElement: () => ({ click() { downloads.push({ href: this.href, download: this.download }) } }),

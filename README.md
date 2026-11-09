@@ -36,6 +36,7 @@ _让 Agent 在睡眠中巩固记忆，在醒来时想起该想起的事_
 
 - [本次改进](#本次改进)
 - [安装](#安装)
+- [GitHub Packages 发布与迁移](docs/guides/package-updates.md)
 - [记忆分层](#记忆分层)
 - [睡眠整理](#睡眠整理memory_sleep)
 - [配置](#配置)
@@ -62,13 +63,22 @@ GUI 并发绕过、未注入候选被强化和预演容量不一致的问题。
 
 ## 安装
 
-零依赖的 DSH 插件 bundle（`name: dsh-sleep-memory`），由插件管理器消费。推荐在 DSH 的「插件 → 添加插件 → 安装第三方插件」里粘贴 git 地址安装：
+零依赖的 DSH 插件 bundle，包名为 `@errorcode864/dsh-sleep-memory`。
+需要远端更新提示时，先按 [发布与迁移指南](docs/guides/package-updates.md)
+完成首次发布和 profile 认证，再在 DSH 的「插件 → 添加插件 → 安装第三方插件」里输入：
 
-```
-git+https://github.com/errorcode864/dsh-sleep-memory.git
+```text
+@errorcode864/dsh-sleep-memory
 ```
 
-- **本地开发**（源码即安装）：把检出目录以 `node_modules/dsh-sleep-memory` 链接进某个 profile（junction 或 `file:` 依赖），并在 profile `package.json` 的 `bundles` 中加入 `dsh-sleep-memory`。`index.js` 改动经插件禁用/启用热重载；`client.js` 改动刷新页面生效。
+Git 仓库地址仍可用于安装，但 `github:`、Git URL、`link:` 和 `file:` 安装不参与
+DSH 的 Registry 版本更新检查。更新提示在打开插件页或手动检查时刷新，不会在发布时主动弹窗。
+
+**本地开发**：profile 的依赖名和 `dsh.profile.bundles` 都使用
+`@errorcode864/dsh-sleep-memory`，依赖值仍可为
+`link:E:/Project/AI/dsh-plugins/sleep-memory`。已有 profile 的
+`cordis.patch.yml` 若覆盖了插件行，也要同步 `name`，保留 `id: sleep-memory`
+和原有配置。`index.js` 改动经插件禁用/启用热重载；`client.js` 改动刷新页面生效。
 
 ## 历史里程碑：M1 至 M10-C
 
@@ -197,7 +207,7 @@ git+https://github.com/errorcode864/dsh-sleep-memory.git
 
 ## 插件配置区（M10-C）
 
-client 模块注册 `plugins.bundle.config` 槽位（key = 包名 `dsh-sleep-memory`），插件管理页会在此插件的详情页上渲染内联配置区，位置在描述与包行之间：
+client 模块注册 `plugins.bundle.config` 槽位（key = 包名 `@errorcode864/dsh-sleep-memory`），插件管理页会在此插件的详情页上渲染内联配置区，位置在描述与包行之间：
 
 | 字段 | 控件 | 范围 |
 | --- | --- | --- |
