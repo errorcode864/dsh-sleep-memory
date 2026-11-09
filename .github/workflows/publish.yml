@@ -4,9 +4,10 @@ name: Release
 # v<version>. The workflow packs once, publishes the same tree as
 # `<version>-dev.<run number>` under npm's `dev` tag so it can be tried at once,
 # runs the checks, writes the `dist` branch so a git install needs no build,
-# then promotes `<version>` as `latest` from the same tarball. npm trusted
-# publishing (OIDC) exchanges `id-token` for a one-time publish token, so no
-# npm secret is stored in the repository.
+# then promotes `<version>` as `latest` from the same tarball. Publishing uses
+# the `NPM_TOKEN` repository secret (npm Automation token); once the package
+# exists and a trusted publisher is configured on npm, the token can be replaced
+# by OIDC trusted publishing (add back `--provenance` and `id-token: write`).
 
 on:
   push:
@@ -89,7 +90,9 @@ jobs:
       # promotes nothing.
       - name: Publish the dev version
         if: steps.state.outputs.published != 'true' && steps.state.outputs.dev == ''
-        run: npm publish "${{ steps.pack.outputs.dev }}" --access public --provenance --tag dev
+        run: npm publish "${{ steps.pack.outputs.dev }}" --access public --tag dev
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Write the dist branch
         if: steps.state.outputs.published != 'true'
         run: |
@@ -108,7 +111,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish to npm
         if: steps.state.outputs.published != 'true'
-        run: npm publish "${{ steps.pack.outputs.release }}" --access public --provenance
+        run: npm publish "${{ steps.pack.outputs.release }}" --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create the GitHub Release
         if: steps.state.outputs.published != 'true'
         env:
