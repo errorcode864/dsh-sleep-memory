@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { apply } from './index.js'
 
+const recordParsers = new WeakMap()
 /** 内存版 KvTable：默认镜像 rc.5 接口，可选新版批量删除；缺失记录不能 update，读取返回快照迭代器。 */
 function makeTable({ batchDelete = false } = {}) {
   const map = new Map()
@@ -14,10 +15,15 @@ function makeTable({ batchDelete = false } = {}) {
     get(id) { return map.get(id) },
     keys() { return [...map.keys()][Symbol.iterator]() },
     entries() { return [...map.entries()][Symbol.iterator]() },
-    async put(id, value) { map.set(id, value) },
+    async put(id, value) {
+      recordParsers.get(table)?.parse(value)
+      assert.equal(id, value.id, '存储键必须与记忆 ID 一致')
+      map.set(id, value)
+    },
     async update(id, updater) {
       if (!map.has(id)) throw new Error(`记忆记录不存在：${id}`)
       const next = updater(map.get(id))
+      recordParsers.get(table)?.parse(next)
       map.set(id, next)
       return next
     },
@@ -45,7 +51,16 @@ const registered = []
 const effects = []
 const handlers = new Map()
 const ctx = {
-  storageDomain: { open: async (spec) => { domain.spec = spec; return domain } },
+  storageDomain: { open: async (spec) => {
+    if (spec.name === 'memory_runtime') {
+      const runtimeTable = makeTable()
+      recordParsers.set(runtimeTable, spec.tables.records.valueSchema)
+      return { table: () => runtimeTable, close: async () => {} }
+    }
+    domain.spec = spec
+    recordParsers.set(table, spec.tables.records.valueSchema)
+    return domain
+  } },
   tools: { register: (def) => { registered.push(def) } },
   effect: (fn) => { effects.push(fn) },
   on: (event, handler) => { handlers.set(event, handler) },
@@ -149,12 +164,20 @@ function makeInstance(config, tableOverride, services = {}) {
   const provided = new Map()
   apply({
     storageDomain: {
-      open: async () => ({
+      open: async (spec) => {
+        if (spec.name === 'memory_runtime') {
+          const runtimeTable = makeTable()
+          recordParsers.set(runtimeTable, spec.tables.records.valueSchema)
+          return { table: () => runtimeTable, close: async () => {} }
+        }
+        recordParsers.set(t, spec.tables.records.valueSchema)
+        return ({
         table: (name) => {
           if (name !== 'records') throw new Error(`declares no table '${name}'`)
           return t
         },
-      }),
+        })
+      },
     },
     tools: { register: (def) => { regs.push(def) } },
     effect: (fn) => { fx.push(fn) },
@@ -305,7 +328,7 @@ assert.equal((await D.sleep.execute({})).code, 'busy', '进行中再次睡眠应
 const regsE = []
 const fxE = []
 apply({
-  storageDomain: { open: async () => ({ table: () => makeTable() }) },
+  storageDomain: { open: async () => ({ table: () => makeTable(), close: async () => {} }) },
   tools: { register: (def) => { regsE.push(def) } },
   effect: (fn) => { fxE.push(fn) },
   on: () => {},
@@ -313,11 +336,11 @@ apply({
   reflect: { provide: () => {} },
 }, { sleepIntervalMinutes: 1 })
 assert.equal(regsE.length, 4)
-assert.equal(fxE.length, 2, '域关闭 + 定时器两个 effect')
-fxE[1]() // 清理定时器，不应抛错
+assert.equal(fxE.length, 1, '域关闭与定时器统一清理')
+await fxE[0]()() // 卸载后不得再启动异步调度
 const fxF = []
 apply({
-  storageDomain: { open: async () => ({ table: () => makeTable() }) },
+  storageDomain: { open: async () => ({ table: () => makeTable(), close: async () => {} }) },
   tools: { register: () => {} },
   effect: (fn) => { fxF.push(fn) },
   on: () => {},
@@ -804,7 +827,7 @@ assert.deepEqual(await m6a.manage.execute({ action: 'stats' }), {
 })
 await m6a.table.put('smm_m61', fixture('smm_m61', { createdAt: T6 - 3000, supersededBy: 'smm_m62' }))
 await m6a.table.put('smm_m62', fixture('smm_m62', { createdAt: T6 - 2000, tags: ['睡眠'] }))
-await m6a.table.put('smm_m63', fixture('smm_m63', { layer: 'salient', createdAt: T6 - 1000, edges: [{ target: 'smm_m61' }] }))
+await m6a.table.put('smm_m63', fixture('smm_m63', { layer: 'salient', createdAt: T6 - 1000, edges: [{ target: 'smm_m61', relation: 'dream-associate', weight: 1 }] }))
 assert.deepEqual(await m6a.manage.execute({ action: 'stats' }), {
   action: 'stats', total: 3, maxRecords: 20000,
   byLayer: { surface: 2, deep: 0, archive: 0, salient: 1 },
@@ -838,8 +861,8 @@ assert.equal(m6long.items[0].content, `${'长'.repeat(120)}……`, '内容截�
 const m6b = makeInstance({})
 await m6b.table.put('smm_f1', fixture('smm_f1', { createdAt: T6 - 4000 }))
 await m6b.table.put('smm_f2', fixture('smm_f2', { createdAt: T6 - 3000, supersededBy: 'smm_f1' }))
-await m6b.table.put('smm_f3', fixture('smm_f3', { createdAt: T6 - 2000, updatedAt: T6 - 2000, edges: [{ target: 'smm_f1' }, { target: 'smm_f2' }] }))
-await m6b.table.put('smm_f4', fixture('smm_f4', { createdAt: T6 - 1000, updatedAt: T6 - 2000, edges: [{ target: 'smm_f3' }] }))
+await m6b.table.put('smm_f3', fixture('smm_f3', { createdAt: T6 - 2000, updatedAt: T6 - 2000, edges: [{ target: 'smm_f1', relation: 'dream-associate', weight: 1 }, { target: 'smm_f2', relation: 'dream-associate', weight: 1 }] }))
+await m6b.table.put('smm_f4', fixture('smm_f4', { createdAt: T6 - 1000, updatedAt: T6 - 2000, edges: [{ target: 'smm_f3', relation: 'dream-associate', weight: 1 }] }))
 const f3Before = await m6b.table.get('smm_f3')
 const forgotten = await m6b.manage.execute({ action: 'forget', id: 'smm_f1' })
 assert.deepEqual(forgotten, { action: 'forget', id: 'smm_f1', layer: 'surface', cascadedCount: 1, edgesRemoved: 2, forgotten: ['smm_f1', 'smm_f2'] })
@@ -849,7 +872,7 @@ const f3After = await m6b.table.get('smm_f3')
 assert.deepEqual(f3After.edges, [], '指向被删记录的入边已剥离')
 assert.ok(f3After.updatedAt > f3Before.updatedAt, '剥离入边时刷新 updatedAt')
 const f4After = await m6b.table.get('smm_f4')
-assert.deepEqual(f4After.edges, [{ target: 'smm_f3' }], '无关入边不动')
+assert.deepEqual(f4After.edges, [{ target: 'smm_f3', relation: 'dream-associate', weight: 1 }], '无关入边不动')
 assert.equal(f4After.updatedAt, f3Before.updatedAt, '未受影响的记录不刷新')
 await m6b.table.put('smm_g1', fixture('smm_g1', { createdAt: T6 - 500 }))
 await m6b.table.put('smm_g2', fixture('smm_g2', { createdAt: T6 - 400, supersededBy: 'smm_g1' }))
@@ -869,7 +892,7 @@ for (const badArgs of [{ action: 'bogus' }, { action: 'list', nope: 1 }, { actio
 // 45. list 卡：meta 投影（截 48 字符）、结果卡整页/半页/空表文案
 const m6c = makeInstance({})
 await m6c.table.put('smm_c1', fixture('smm_c1', { createdAt: T6 - 3000, supersededBy: 'smm_c3' }))
-await m6c.table.put('smm_c2', fixture('smm_c2', { layer: 'salient', createdAt: T6 - 2000, edges: [{ target: 'smm_c1' }] }))
+await m6c.table.put('smm_c2', fixture('smm_c2', { layer: 'salient', createdAt: T6 - 2000, edges: [{ target: 'smm_c1', relation: 'dream-associate', weight: 1 }] }))
 await m6c.table.put('smm_c3', fixture('smm_c3', { createdAt: T6 - 1000 }))
 const cList = await m6c.manage.execute({ action: 'list' })
 const cMeta = m6c.manage.output.presentationMeta({ action: 'list' }, cList)
@@ -1053,7 +1076,7 @@ assert.ok(api1, 'GUI 服务应注册进 reflect')
 assert.deepEqual(api1.typertRemote, { service: api1, serviceKey: 'sleepMemoryApi', namespace: 'sleepMemoryApi' }, 'typertRemote 绑定形状')
 const gDescriptor = Object.getPrototypeOf(api1)['@deepseek-ai/dsh-typert-protocol/remote-methods']
 assert.equal(gDescriptor.version, 1, 'Remote 方法标记 version 1')
-assert.deepEqual(gDescriptor.methods.map((m) => m.method), ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig'], '六个 Remote 方法')
+assert.deepEqual(gDescriptor.methods.map((m) => m.method), ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'], '十个 Remote 方法')
 assert.ok(gDescriptor.methods.every((m) => m.invocation.kind === 'direct'), '全部 direct invocation')
 
 // 56. stats：只计活记录、分层计数、superseded/边数、最早最晚时间

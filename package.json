@@ -1,6 +1,11 @@
 {
   "name": "dsh-sleep-memory",
-  "version": "0.1.0",
+  "version": "0.3.0",
+  "scripts": {
+    "test": "node smoke.mjs && node --test tests/*.test.mjs",
+    "eval": "node eval.mjs",
+    "test:host": "node tests/host-integration.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/errorcode864/dsh-sleep-memory.git"
@@ -19,10 +24,16 @@
     "README.en.md",
     "icon.svg",
     "index.js",
+    "memory-contract.js",
+    "memory-management.js",
+    "memory-runtime.js",
     "client.js",
     "cordis.patch.yml",
     "locale",
-    "smoke.mjs"
+    "smoke.mjs",
+    "tests",
+    "eval.mjs",
+    "docs"
   ],
   "dsh": {
     "bundle": {

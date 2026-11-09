@@ -1,4 +1,17 @@
-# dsh-sleep-memory — persistent memory for agents
+---
+id: sleep-memory.readme-legacy
+title: 历史英文说明
+type: history
+status: archived
+updated: 2026-11-09
+source_of_truth: history
+---
+
+# 历史英文说明
+
+> 以下为 `0.1.0` 阶段的英文历史说明，保留用于追溯，不作为当前接口契约。
+> 当前 `0.2.0` 的变更、配置、原文追溯与备份能力以 [中文说明](README.md)
+> 和 [使用指南](docs/guides/reliability.md) 为准。
 
 [English](./README.en.md) | [简体中文](./README.md)
 

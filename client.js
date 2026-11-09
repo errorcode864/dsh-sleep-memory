@@ -35,8 +35,8 @@ window.__ModuleLoader__.load({
 
     const REMOTE_SERVICE = 'sleepMemoryApi';
     const REMOTE_NAMESPACE = 'sleepMemoryApi';
-    const NOARG_METHODS = new Set(['stats', 'edges', 'getConfig']);
-    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig'];
+    const NOARG_METHODS = new Set(['stats', 'edges', 'getConfig', 'status']);
+    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'];
     const INPUT_CODEC = Object.freeze({
       mode: 'strict',
       typeSymbol: Symbol('sleepMemoryApi.input'),
@@ -65,7 +65,7 @@ window.__ModuleLoader__.load({
 
       'sleep-memory.stats.title': '库概况',
       'sleep-memory.stats.total': '{n} 条活记录',
-      'sleep-memory.stats.superseded': '{n} 条已被合并',
+      'sleep-memory.stats.superseded': '{n} 条未参与自动召回',
       'sleep-memory.stats.edges': '{n} 条联想边',
       'sleep-memory.stats.span': '{from} ~ {to}',
       'sleep-memory.stats.spanSingle': '{at}',
@@ -350,6 +350,18 @@ window.__ModuleLoader__.load({
 .sm-config-note { padding: 10px 16px; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary); }
 .sm-config-error { padding: 8px 16px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-error-primary); }
 
+/* 管理表单沿用宿主色板，展开后保持独立字段与可读的确认区域。 */
+.sm-management { display: block; padding: 12px 14px; overflow-wrap: anywhere; }
+.sm-management > summary { cursor: pointer; font-weight: 600; }
+.sm-management > label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.sm-management .sm-select { max-width: 100%; align-self: flex-start; }
+.sm-management textarea.sm-search { height: auto; min-height: 100px; padding: 8px 10px; resize: vertical; }
+.sm-management .sm-btn { margin: 4px 8px 4px 0; }
+.sm-management p { margin: 10px 0; }
+.sm-management [role="status"] { padding: 10px; margin-top: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm); }
+.sm-project-filter { flex: 1 1 200px; min-width: 140px; width: auto; }
+.sm-status p { margin: 2px 0; }
+
 @media (prefers-reduced-motion: no-preference) {
   .sm-btn, .sm-tab { transition-duration: var(--ds-transition-duration-fast, 0.12s); }
 }
@@ -607,7 +619,23 @@ window.__ModuleLoader__.load({
         }
 
         /** One live memory record: badges + content + tags + metric bars. */
-        function RecordRow({ item }) {
+        function RecordRow({ item, onChanged }) {
+          const [detail, setDetail] = useState(null);
+          const [detailBusy, setDetailBusy] = useState(false);
+          const [detailError, setDetailError] = useState('');
+          const loadDetail = async (offset = 0) => {
+            setDetailBusy(true);
+            setDetailError('');
+            try {
+              const result = await call('getRecord', { id: item.id, offset, limit: 5 });
+              if (result.code) throw new Error(result.message);
+              setDetail(result);
+            } catch (error) {
+              setDetailError(String(error.message ?? error));
+            } finally {
+              setDetailBusy(false);
+            }
+          };
           const kindLabel = item.kind === 'fact' ? t('sleep-memory.kind.fact') : t('sleep-memory.kind.experience');
           const salient = item.layer === 'salient' && Number.isFinite(Number(item.valence));
           const meta = [
@@ -617,6 +645,27 @@ window.__ModuleLoader__.load({
               ? t('sleep-memory.row.edgeCount', { n: item.edges.length }) : null,
           ].filter(Boolean).join(' · ');
           return h('li', { className: 'sm-row', key: item.id },
+            h('div', { className: 'sm-rowmeta' }, `范围：${item.projectId ?? '全局'} · 来源：${item.source?.kind ?? '未注明'} · ${STATE_LABELS[item.lifecycle?.state ?? 'active']}`),
+            h('button', {
+              type: 'button', className: 'sm-btn sm-btn-outline', disabled: detailBusy,
+              onClick: () => detail ? setDetail(null) : void loadDetail(),
+            }, detailBusy ? '正在读取原文…' : detail ? '收起原文' : '查看原文与来源'),
+            detailError ? h('div', { role: 'alert' }, `读取失败：${detailError}`) : null,
+            detail ? h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+              h('p', null, `记忆 ID：${detail.record.id} · ${detail.current ? '当前有效' : '未参与自动召回'}`),
+              h('p', null, detail.record.content),
+              h('p', null, `有效性：${STATE_LABELS[detail.lifecycle.state]}${detail.lifecycle.reason ? ` · ${detail.lifecycle.reason}` : ''}`),
+              detail.replacedBy ? h('p', null, `替代记忆：${detail.replacedBy}`) : null,
+              h('p', null, `纠正链：${detail.totalChain} 条`),
+              ...detail.chain.map((record) => h('div', { key: record.id },
+                h('code', null, record.id), h('p', null, record.content))),
+              h(RecordEditor, { detail, onChanged: () => { void loadDetail(); onChanged?.(); } }),
+              h('p', null, `来源记录：${detail.totalSources} 条`),
+              ...detail.sources.map((source) => h('div', { key: source.id },
+                h('strong', null, source.id), h('p', null, source.content))),
+              detail.offset > 0 ? h('button', { type: 'button', disabled: detailBusy, onClick: () => void loadDetail(Math.max(0, detail.offset - 5)) }, '上一页来源') : null,
+              detail.offset + detail.limit < Math.max(detail.totalSources, detail.totalChain)
+                ? h('button', { type: 'button', disabled: detailBusy, onClick: () => void loadDetail(detail.offset + detail.limit) }, '下一页来源') : null) : null,
             h('div', { className: 'sm-rowhead' },
               h(LayerBadge, { layer: item.layer }),
               h('span', { className: 'sm-badge' }, kindLabel),
@@ -635,6 +684,174 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sm-bars' },
               h(MiniBar, { label: t('sleep-memory.row.importance'), value: item.importance }),
               h(MiniBar, { label: t('sleep-memory.row.strength'), value: item.strength })));
+        }
+
+        const STATE_LABELS = { active: '有效', review: '待复核', invalid: '已失效' };
+        const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
+        const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+
+        /** 纠正前展示新旧正文，状态变更必须先取得服务端影响计划。 */
+        function RecordEditor({ detail, onChanged }) {
+            const [mode, setMode] = useState('state');
+            const [content, setContent] = useState('');
+            const [state, setState] = useState('review');
+            const [reason, setReason] = useState('');
+            const [plan, setPlan] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            useEffect(() => { setPlan(null); }, [detail]);
+            const invalidate = (setter) => (event) => { setter(event.target.value); setPlan(null); setMessage(''); };
+            const submit = async (confirm) => {
+                setBusy(true); setMessage('');
+                try {
+                    const base = { id: detail.record.id, projectId: detail.record.projectId ?? null };
+                    if (!confirm && mode === 'correct') {
+                        setPlan({ mode, content: content.trim() });
+                    } else if (mode === 'correct') {
+                        await call('manage', { ...base, action: 'correct', content: plan.content, source: { kind: 'user', confirmed: true } });
+                        setPlan(null); setContent(''); setMessage('已纠正，历史原文保留。'); onChanged?.();
+                    } else {
+                        const result = await call('manage', {
+                            ...base, action: 'setState', state, reason, dryRun: !confirm,
+                            ...(confirm ? { planToken: plan.planToken } : {}),
+                        });
+                        if (confirm) { setPlan(null); setMessage('有效性已更新，历史原文保留。'); onChanged?.(); }
+                        else setPlan(result);
+                    }
+                } catch (error) {
+                    setPlan(null); setMessage(`操作失败：${error.message}`);
+                } finally { setBusy(false); }
+            };
+            return h('details', { className: 'sm-card sm-management' },
+                h('summary', null, '纠正与有效性管理'),
+                h('label', null, '管理操作',
+                    h('select', { className: 'sm-select', value: mode, disabled: busy, onChange: invalidate(setMode) },
+                        h('option', { value: 'state' }, '整条纠正链有效性'),
+                        detail.current && detail.record.kind === 'fact' && detail.record.layer !== 'deep'
+                            ? h('option', { value: 'correct' }, '纠正当前事实') : null)),
+                mode === 'correct'
+                    ? h('label', null, '完整的新事实', h('textarea', {
+                        className: 'sm-search', rows: 4, value: content, disabled: busy,
+                        'aria-label': '完整的新事实', onChange: invalidate(setContent),
+                    }))
+                    : h(React.Fragment, null,
+                        h('label', null, '目标状态', h('select', {
+                            className: 'sm-select', value: state, disabled: busy,
+                            'aria-label': '目标状态', onChange: invalidate(setState),
+                        }, Object.entries(STATE_LABELS).map(([key, label]) => h('option', { key, value: key }, label)))),
+                        h('label', null, '变更原因', h('input', {
+                            className: 'sm-search', value: reason, maxLength: 1000, disabled: busy,
+                            'aria-label': '变更原因', onChange: invalidate(setReason),
+                        }))),
+                plan ? h('div', { role: 'status', style: { overflowWrap: 'anywhere' } },
+                    mode === 'correct'
+                        ? h(React.Fragment, null, h('p', null, `原事实：${detail.record.content}`), h('p', null, `新事实：${plan.content}`))
+                        : h(React.Fragment, null,
+                            h('p', null, `整链 ${plan.chainIds.length} 条，影响 ${plan.affectedIds.length} 条记忆或概要。`),
+                            h('p', null, `链内 ID：${plan.chainIds.join('、')}`),
+                            h('p', null, `影响 ID：${plan.affectedIds.join('、') || '无'}`)),
+                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void submit(true) }, '确认变更')) : null,
+                h('button', {
+                    className: 'sm-btn sm-btn-outline', type: 'button',
+                    disabled: busy || (mode === 'correct' ? !content.trim() : !reason.trim()),
+                    onClick: () => void submit(false),
+                }, busy ? '处理中…' : '预览变更'),
+                message ? h('p', { role: 'status' }, message) : null);
+        }
+
+        /** 会话选择与项目绑定使用明确 ID，空项目表示全局，释放后回退自动范围。 */
+        function ScopePanel() {
+            const [sessionId, setSessionId] = useState('');
+            const [projectId, setProjectId] = useState('');
+            const [data, setData] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            useEffect(() => {
+                let alive = true;
+                call('scope', sessionId ? { sessionId } : {})
+                    .then((result) => { if (alive) { setData(result); setProjectId(result.scope.projectId ?? ''); setError(''); } })
+                    .catch((cause) => { if (alive) setError(cause.message); });
+                return () => { alive = false; };
+            }, [sessionId]);
+            const bind = async (release) => {
+                setBusy(true); setError('');
+                try {
+                    const result = await call('manage', { action: 'bind', sessionId, projectId: projectId.trim() || null, release });
+                    setData(result); setProjectId(result.scope.projectId ?? '');
+                } catch (cause) { setError(cause.message); }
+                finally { setBusy(false); }
+            };
+            return h('details', { className: 'sm-card sm-management' },
+                h('summary', null, '会话与项目范围'),
+                h('p', null, '选择会话查看自动范围；绑定仅影响今后的写入与检索，不迁移已有记忆。'),
+                h('label', null, '会话 ID', h('input', {
+                    className: 'sm-search', list: 'sm-session-options', value: sessionId, disabled: busy,
+                    'aria-label': '会话 ID', onChange: (event) => { setSessionId(event.target.value); setData(null); },
+                })),
+                h('datalist', { id: 'sm-session-options' }, (data?.sessions ?? []).map((id) => h('option', { key: id, value: id }))),
+                data ? h('p', null, `${sessionId ? '所选会话' : '无会话上下文'}：${data.scope.projectId ?? '全局'} · 来源：${SCOPE_LABELS[data.scope.source]}`) : null,
+                data?.scope.source === 'global' ? h('p', null, '未绑定项目，当前回退全局范围。') : null,
+                h('label', null, '项目标识（留空为全局）', h('input', {
+                    className: 'sm-search', value: projectId, maxLength: 200, disabled: busy,
+                    'aria-label': '绑定项目标识', onChange: (event) => setProjectId(event.target.value),
+                })),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !sessionId.trim() || !data, onClick: () => void bind(false) }, '保存会话绑定'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !sessionId.trim() || !data, onClick: () => void bind(true) }, '释放会话绑定'),
+                error ? h('p', { role: 'alert' }, `范围操作失败：${error}`) : null);
+        }
+
+        /** 文件在浏览器中选择与下载；导入持有同一份预演快照，修改文件后必须重新预演。 */
+        function BackupPanel({ onChanged }) {
+            const [backup, setBackup] = useState(null);
+            const [plan, setPlan] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const selection = useRef(0);
+            const choose = async (event) => {
+                const revision = ++selection.current;
+                setBackup(null); setPlan(null); setMessage('');
+                const file = event.target.files?.[0];
+                if (!file) return;
+                try {
+                    if (!file.name.toLowerCase().endsWith('.json') || file.size > MAX_BACKUP_BYTES) {
+                        throw new Error('请选择不超过 10 MiB 的 JSON 备份文件');
+                    }
+                    const value = JSON.parse(await file.text());
+                    if (revision === selection.current) setBackup(value);
+                } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
+            };
+            const run = async (action, dryRun = true) => {
+                setBusy(true); setMessage('');
+                try {
+                    if (action === 'export') {
+                        const result = await call('manage', { action });
+                        const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json;charset=utf-8' });
+                        if (blob.size > MAX_BACKUP_BYTES) throw new Error('备份超过界面 10 MiB 限制，请使用管理工具导出');
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = url; link.download = `sleep-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+                        link.click();
+                        setTimeout(() => URL.revokeObjectURL(url), 1000);
+                        setMessage('已生成备份下载，包含历史原文及来源。');
+                    } else {
+                        const result = await call('manage', { action, backup, dryRun });
+                        if (dryRun) setPlan(result);
+                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条，跳过 ${result.skipped} 条。`); onChanged?.(); }
+                    }
+                } catch (error) {
+                    setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
+                } finally { setBusy(false); }
+            };
+            return h('details', { className: 'sm-card sm-management' },
+                h('summary', null, '备份与恢复'),
+                h('p', null, '备份包含全库历史与来源。导入先预演；同 ID 异内容会拒绝，发生 I/O 中断可用原文件重试。'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
+                h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
+                plan ? h('div', { role: 'status' },
+                    h('p', null, `将新增 ${plan.planned} 条，跳过 ${plan.skipped} 条。`),
+                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
+                message ? h('p', { role: 'status' }, message) : null);
         }
 
         /** Overview card: totals, per-layer counts, superseded, edges, time span. */
@@ -755,6 +972,39 @@ window.__ModuleLoader__.load({
 
         // ---- memory bank page ----------------------------------------------
 
+        function RuntimeStatus() {
+          const [state, setState] = useState(null);
+          const [error, setError] = useState('');
+          useEffect(() => {
+            let active = true;
+            const refresh = async () => {
+              try {
+                const result = await call('status');
+                if (active) { setState(result); setError(''); }
+              } catch (cause) {
+                if (active) setError(String(cause.message ?? cause));
+              }
+            };
+            void refresh();
+            const timer = setInterval(refresh, 10000);
+            return () => { active = false; clearInterval(timer); };
+          }, []);
+          const formatTime = (value) => value ? new Date(value).toLocaleString() : '暂无';
+          return h('section', { className: 'sm-card sm-row sm-status', 'aria-label': '记忆运行状态' },
+            h('strong', null, '运行状态'),
+            error ? h('p', { role: 'alert' }, `状态读取失败：${error}`) : null,
+            state ? h(React.Fragment, null,
+              h('p', null, `配置回退范围：${state.projectId ?? '全局'} · ${state.sleeping ? '正在睡眠整理' : '空闲'}`),
+              h('p', null, `上次成功睡眠（持久）：${formatTime(state.schedule?.lastSuccessAt)} · 下次定时：${state.nextSleepAt ? formatTime(state.nextSleepAt) : '未启用'}`),
+              h('p', null, '以下计数仅统计本次加载：'),
+              h('p', null, `情绪评分：已尝试 ${state.scoring.attempted} 次，写入 ${state.scoring.stored} 条，跳过 ${state.scoring.skipped} 次，失败 ${state.scoring.failed} 次`),
+              h('p', null, `查询扩展：成功 ${state.expansion.succeeded} 次，失败或不可用 ${state.expansion.failed} 次`),
+              h('p', null, `自动注入：${state.injection?.injected ?? 0} 条 · 重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次 · 预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
+              state.schedule?.lastError ? h('p', { role: 'alert' }, `持久调度状态：${state.schedule.lastError} · 连续失败 ${state.schedule.failures} 次`) : null,
+              state.lastSleepError ? h('p', { role: 'alert' }, `最近睡眠失败：${state.lastSleepError.message}`) : null)
+              : h('p', null, '正在读取运行状态…'));
+        }
+
         function MemoryBankPage() {
           useLocale();
           const toast = useToast();
@@ -763,6 +1013,9 @@ window.__ModuleLoader__.load({
 
           // Browse state: layer filter, debounced query, one accumulating page.
           const [layer, setLayer] = useState('all');
+          const [validity, setValidity] = useState('active');
+          const [projectFilter, setProjectFilter] = useState('');
+          const [globalOnly, setGlobalOnly] = useState(false);
           const [queryInput, setQueryInput] = useState('');
           const [query, setQuery] = useState('');
           const [items, setItems] = useState(null);
@@ -770,6 +1023,7 @@ window.__ModuleLoader__.load({
           const [page, setPage] = useState(0);
           const [loading, setLoading] = useState(false);
           const queryTimer = useRef(null);
+          const listRequest = useRef(0);
 
           // Edges load lazily when the tab opens.
           const [edgesList, reloadEdges] = useEdges(view === 'edges');
@@ -786,6 +1040,7 @@ window.__ModuleLoader__.load({
           }, [queryInput]);
 
           const loadPage = useCallback(async (targetPage, append) => {
+            const request = ++listRequest.current;
             setLoading(true);
             try {
               const outcome = await call('list', {
@@ -793,18 +1048,22 @@ window.__ModuleLoader__.load({
                 query: query === '' ? undefined : query,
                 limit: PAGE_SIZE,
                 offset: targetPage * PAGE_SIZE,
+                state: validity,
+                ...(globalOnly ? { projectId: null } : projectFilter.trim() ? { projectId: projectFilter.trim() } : {}),
               });
+              if (request !== listRequest.current) return;
               const next = Array.isArray(outcome?.items) ? outcome.items : [];
               setTotal(outcome?.total ?? 0);
               setItems((prev) => (append && Array.isArray(prev) ? [...prev, ...next] : next));
               setPage(targetPage);
             } catch (error) {
+              if (request !== listRequest.current) return;
               if (!append) setItems([]);
               showToast(`${t('sleep-memory.toast.failed')}：${error?.message ?? error}`, true);
             } finally {
-              setLoading(false);
+              if (request === listRequest.current) setLoading(false);
             }
-          }, [layer, query, t]);
+          }, [layer, query, validity, projectFilter, globalOnly, t]);
 
           useEffect(() => {
             void loadPage(0, false);
@@ -827,7 +1086,7 @@ window.__ModuleLoader__.load({
           }, [loadPage, reloadEdges, reloadStats, t]);
 
           const hasMore = items !== null && items.length < total;
-          const filterActive = layer !== 'all' || query !== '';
+          const filterActive = layer !== 'all' || query !== '' || validity !== 'active' || projectFilter !== '' || globalOnly;
 
           let browseBody;
           if (items === null && loading) {
@@ -838,11 +1097,13 @@ window.__ModuleLoader__.load({
             browseBody = EmptyState({
               title: t('sleep-memory.empty.filtered.title'),
               actionLabel: t('sleep-memory.empty.filtered.action'),
-              onAction: () => { setQueryInput(''); setQuery(''); setLayer('all'); },
+              onAction: () => { setQueryInput(''); setQuery(''); setLayer('all'); setValidity('active'); setProjectFilter(''); setGlobalOnly(false); },
             });
           } else {
             browseBody = h(React.Fragment, null,
-              h('ul', { className: 'sm-rows' }, (items ?? []).map((item) => h(RecordRow, { item, key: item.id }))),
+              h('ul', { className: 'sm-rows' }, (items ?? []).map((item) => h(RecordRow, {
+                item, key: item.id, onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); },
+              }))),
               hasMore ? h('div', { style: { display: 'flex', justifyContent: 'center', padding: '10px 0 0' } },
                 h('button', {
                   type: 'button', className: 'sm-btn sm-btn-outline',
@@ -857,6 +1118,9 @@ window.__ModuleLoader__.load({
                 h('h1', { className: 'sm-title' }, t('sleep-memory.page.title'))),
 
               h(StatsCard, { stats, onRefresh: reloadStats }),
+              h(RuntimeStatus),
+              h(ScopePanel),
+              h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } }),
 
               h(SleepBanner, { report, onDismiss: () => setReport(null) }),
 
@@ -904,6 +1168,12 @@ window.__ModuleLoader__.load({
                       onChange: (event) => setQueryInput(event.target.value),
                     })),
                   h('label', { className: 'sm-visually-hidden', htmlFor: 'sm-layer' }, t('sleep-memory.filter.label')),
+                  h('select', { className: 'sm-select', value: validity, 'aria-label': '有效性筛选', onChange: (event) => setValidity(event.target.value) },
+                    ...Object.entries(STATE_LABELS).map(([key, label]) => h('option', { key, value: key }, label)),
+                    h('option', { value: 'all' }, '全部历史')),
+                  h('input', { className: 'sm-search sm-project-filter', value: projectFilter, disabled: globalOnly, placeholder: '项目标识，留空浏览全部项目',
+                    'aria-label': '项目筛选', onChange: (event) => setProjectFilter(event.target.value) }),
+                  h('label', null, h('input', { type: 'checkbox', checked: globalOnly, onChange: (event) => setGlobalOnly(event.target.checked) }), '仅全局'),
                   h('select', {
                     id: 'sm-layer', className: 'sm-select', value: layer,
                     'aria-label': t('sleep-memory.filter.label'),
@@ -928,7 +1198,8 @@ window.__ModuleLoader__.load({
 
         // ---- bundle detail page inline config (plugins.bundle.config) --------
 
-        const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes'];
+        const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
+          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
         function configDraftFrom(fields) {
@@ -938,7 +1209,7 @@ window.__ModuleLoader__.load({
             if (!field) continue;
             draft[key] = field.type === 'boolean'
               ? field.value === true
-              : (typeof field.value === 'number' && Number.isFinite(field.value) ? String(field.value) : '');
+              : (field.type === 'string' ? String(field.value ?? '') : (typeof field.value === 'number' && Number.isFinite(field.value) ? String(field.value) : ''));
           }
           return draft;
         }
@@ -998,6 +1269,9 @@ window.__ModuleLoader__.load({
             if (!field) continue;
             if (field.type === 'boolean') {
               parsed[key] = draft[key] === true;
+            } else if (field.type === 'string') {
+              parsed[key] = String(draft[key] ?? '');
+              if (parsed[key].length > 200 || parsed[key] !== parsed[key].trim()) valid = false;
             } else {
               parsed[key] = configParseNumber(String(draft[key] ?? ''), field);
               if (parsed[key] === null) valid = false;
@@ -1043,6 +1317,25 @@ window.__ModuleLoader__.load({
           }, t('sleep-memory.config.reset'));
 
           const rows = [];
+          for (const [key, label, hint] of [
+            ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
+            ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
+          ]) {
+            if (!fields[key]) continue;
+            rows.push(h('label', { className: 'sm-config-row', key },
+              h('span', { className: 'sm-config-label' }, label),
+              h('input', { type: 'checkbox', disabled: busy, checked: parsed[key] === true, onChange: () => setBoolean(key) }),
+              h('span', { className: 'sm-config-hint' }, hint),
+              fields[key].overridden ? resetButton(key) : null));
+          }
+          if (fields.projectId) rows.push(h('label', { className: 'sm-config-row', key: 'projectId' },
+            h('span', { className: 'sm-config-label' }, '配置回退项目范围'),
+            h('input', {
+              type: 'text', className: 'sm-search', maxLength: 200, disabled: busy,
+              value: String(draft.projectId ?? ''), onChange: (event) => setNumber('projectId', event.target.value),
+            }),
+            h('span', { className: 'sm-config-hint' }, '无会话绑定或工作区时使用；空值表示全局'),
+            fields.projectId.overridden ? resetButton('projectId') : null));
           rows.push(h('label', { className: 'sm-config-row', key: 'injectEnabled' },
             h('span', { className: 'sm-config-label' }, t('sleep-memory.config.field.injectEnabled')),
             h('input', {
@@ -1064,6 +1357,24 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setNumber(key, event.target.value),
               }),
               h('span', { className: 'sm-config-hint' }, t(`sleep-memory.config.field.${key}.hint`)),
+              field.overridden ? resetButton(key) : null));
+          }
+          for (const [key, label, hint] of [
+            ['injectMaxTotalChars', '注入总字符预算', '包含标题、来源和关联内容，超过预算的条目不注入'],
+            ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
+            ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
+            ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
+          ]) {
+            const field = fields[key];
+            if (!field) continue;
+            rows.push(h('label', { className: 'sm-config-row', key },
+              h('span', { className: 'sm-config-label' }, label),
+              h('input', {
+                type: 'number', className: 'sm-search sm-config-num', min: field.min, max: field.max, step: 1,
+                value: String(draft[key] ?? ''), disabled: busy, 'aria-label': label,
+                onChange: (event) => setNumber(key, event.target.value),
+              }),
+              h('span', { className: 'sm-config-hint' }, hint),
               field.overridden ? resetButton(key) : null));
           }
 
