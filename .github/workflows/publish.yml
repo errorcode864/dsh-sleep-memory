@@ -69,6 +69,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          mkdir -p .debug
           npm pack --ignore-scripts --pack-destination .debug
           tarball=".debug/dsh-sleep-memory-${VERSION}.tgz"
           devtarball=".debug/dsh-sleep-memory-${VERSION}-dev.${GITHUB_RUN_NUMBER}.tgz"
