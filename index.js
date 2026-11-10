@@ -51,6 +51,18 @@ const LAYERS = ['surface', 'deep', 'archive', 'salient']
 /** BM25 参数：Robertson/Spärck Jones 推荐值，属于检索算法协议常数，不随部署变化。 */
 const BM25_K1 = 1.2
 const BM25_B = 0.75
+/** 自动注入忽略常见请求用语，避免通用词重叠被当成主题相关性。 */
+const INJECTION_STOP_WORDS = new Set([
+  '可以', '需要', '一下', '看看', '这个', '那个', '这些', '那些', '我们', '你们', '他们',
+  '是否', '什么', '怎么', '如何', '现在', '当前', '已经', '之前', '之后', '然后',
+  '进行', '使用', '用户', '请问', '帮我', '继续',
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'continue', 'do', 'for', 'from',
+  'has', 'have', 'i', 'in', 'is', 'it', 'of', 'on', 'or', 'please', 'that',
+  'the', 'this', 'to', 'was', 'we', 'with', 'you',
+])
+const INJECTION_STOP_PHRASES = new RegExp(
+  [...INJECTION_STOP_WORDS].filter((word) => /^[\u4e00-\u9fff]+$/.test(word)).join('|'), 'g',
+)
 const MEMORY_INPUT_FIELDS = {
   projectId: { type: ['string', 'null'], description: '稳定项目标识；缺省采用会话/工作区/配置范围，null 显式指定全局' },
   source: {
@@ -293,6 +305,13 @@ function tokenize(text) {
     for (let i = 0; i < chars.length - 1; i++) tokens.push(chars[i] + chars[i + 1])
   }
   return tokens
+}
+
+/** 自动注入要求中文二元组或有效 ASCII 词元；单字查询仍由显式召回支持。 */
+function tokenizeForInjection(text) {
+  // 先分隔通用短语，避免“你可以”产生“你可”这类跨词噪声。
+  return tokenize(text.replace(INJECTION_STOP_PHRASES, ' ')).filter((token) => !/^[\u4e00-\u9fff]$/.test(token)
+    && !INJECTION_STOP_WORDS.has(token))
 }
 
 /** 文档的 BM25 词频索引。 */
@@ -1064,7 +1083,13 @@ async function runRecallCore(table, query, scope) {
   }
 
   const queryTokens = tokenize(query)
-  const docTokens = candidates.map(([, rec]) => tokenize([rec.content, ...rec.tags, ...rec.keywords].join(' ')))
+  const injectionTokens = scope.automatic ? tokenizeForInjection(query) : undefined
+  // 自动注入没有有效检索词时直接跳过，不能沿用显式按层浏览的全库回退。
+  if (injectionTokens?.length === 0) {
+    return { ranked: [], associated: [], totalCandidates: candidates.length, now }
+  }
+  const docTexts = candidates.map(([, rec]) => [rec.content, ...rec.tags, ...rec.keywords].join(' '))
+  const docTokens = docTexts.map(tokenize)
   const index = buildBm25Index(docTokens)
   const scores = queryTokens.length > 0 ? bm25Scores(index, queryTokens) : docTokens.map(() => 0)
   // 语义扩展（M8）：同一候选集上对扩展检索词再算一次 BM25，按权重加到原词分上；
@@ -1073,6 +1098,9 @@ async function runRecallCore(table, query, scope) {
     ? tokenize(expandedTerms.join(' '))
     : []
   const expandedScores = expandedTokens.length > 0 ? bm25Scores(index, expandedTokens) : []
+  const injectionTerms = injectionTokens ? new Set([
+    ...injectionTokens, ...tokenizeForInjection(expandedTerms?.join(' ') ?? ''),
+  ]) : undefined
   const ranked = candidates
     .map(([id, rec], i) => {
       let score = scores[i]
@@ -1082,6 +1110,8 @@ async function runRecallCore(table, query, scope) {
       if (rec.layer === 'salient' && rec.arousal !== null) {
         score *= 1 + cfg.salienceRecallBoost * rec.arousal
       }
+      // 在预算截断前排除只有单字、通用词重叠的候选，保留既有 BM25 分数门槛。
+      if (injectionTerms && !tokenizeForInjection(docTexts[i]).some((term) => injectionTerms.has(term))) score = 0
       return { id, rec, score }
     })
     .filter((hit) => (hit.score > 0 || queryTokens.length === 0) && hit.score >= (scope.minScore ?? 0))
@@ -1298,7 +1328,7 @@ class SleepMemoryApiService {
 
   /**
    * 全库概况：分层计数（仅活记录）、被 superseded 数、关联边总数与最早/最晚创建时间。
-   * @returns {Promise<{total: number, supersededCount: number, edgeCount: number, byLayer: Record<string, number>, oldest: number|null, newest: number|null}>}
+   * @returns {Promise<{total: number, supersededCount: number, edgeCount: number, byLayer: Record<string, number>, oldest: number|null, newest: number|null, projects: object[], projectError: string|null}>}
    */
   async stats() {
     const table = await this.capabilities.openRecords()
@@ -1310,7 +1340,11 @@ class SleepMemoryApiService {
     let edgeCount = 0
     let oldest = null
     let newest = null
+    const projects = new Map()
     for (const [, rec] of table.entries()) {
+      const projectId = getProjectId(rec)
+      if (!projects.has(projectId)) projects.set(projectId, { projectId, title: projectId ?? '全局记忆', total: 0 })
+      projects.get(projectId).total += 1
       edgeCount += rec.edges.length
       if (!view.isCurrent(rec) || view.isConsolidated(rec)) { supersededCount += 1; continue }
       total += 1
@@ -1318,13 +1352,22 @@ class SleepMemoryApiService {
       if (oldest === null || rec.createdAt < oldest) oldest = rec.createdAt
       if (newest === null || rec.createdAt > newest) newest = rec.createdAt
     }
-    return { total, supersededCount, edgeCount, byLayer, oldest, newest }
+    let projectError = null
+    try {
+      const names = new Map(this.capabilities.workspaceScopes().map((workspace) => [workspace.projectId, workspace.title]))
+      for (const project of projects.values()) project.title = names.get(project.projectId) ?? project.title
+    } catch {
+      // 项目名称读取失败不影响已有记忆的浏览；保留真实标识并明确提示。
+      projectError = '项目名称暂不可用，当前显示项目标识'
+    }
+    return { total, supersededCount, edgeCount, byLayer, oldest, newest,
+      projects: [...projects.values()].sort((a, b) => (a.projectId ?? '').localeCompare(b.projectId ?? '')), projectError }
   }
 
   /**
-   * 分页浏览活记录：层过滤、子串查询（id/正文/标签/关键词）、lastAccessAt 倒序。
-   * @param {{layer?: string, query?: string, limit?: number, offset?: number}|undefined} input
-   * @returns {Promise<{items: object[], total: number, offset: number, limit: number}>}
+   * 分页浏览记忆；项目分组先排序再分页，并返回完整筛选结果的分组数量。
+   * @param {{layer?: string, query?: string, limit?: number, offset?: number, projectId?: string|null, state?: string, includeGlobal?: boolean, groupBy?: 'project'}|undefined} input
+   * @returns {Promise<{items: object[], total: number, offset: number, limit: number, groups: object[]}>}
    */
   async list(input) {
     if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
@@ -1347,6 +1390,10 @@ class SleepMemoryApiService {
     if (validateMetadata(raw).length || (raw.state !== undefined && !['active', 'review', 'invalid', 'all'].includes(raw.state))) {
       throw apiFail('bad-request', '项目范围或有效性筛选不合法')
     }
+    if ((raw.includeGlobal !== undefined && typeof raw.includeGlobal !== 'boolean')
+      || (raw.groupBy !== undefined && raw.groupBy !== 'project')) {
+      throw apiFail('bad-request', '包含全局记忆须为布尔值，分组仅支持 project')
+    }
 
     const table = await this.capabilities.openRecords()
     const view = createRecordView([...table.entries()])
@@ -1354,13 +1401,31 @@ class SleepMemoryApiService {
       .filter(([, rec]) => raw.state === 'all'
         || (raw.state && raw.state !== 'active' ? view.lifecycleOf(rec).state === raw.state
           : view.isCurrent(rec) && !view.isConsolidated(rec)))
-      .filter(([, rec]) => !Object.hasOwn(raw, 'projectId') || matchesProject(rec, raw.projectId, false))
+      .filter(([, rec]) => !Object.hasOwn(raw, 'projectId') || matchesProject(rec, raw.projectId, raw.includeGlobal === true))
       .filter(([, rec]) => layer === undefined || layer === null || rec.layer === layer)
       .filter(([id, rec]) => {
         if (text === '') return true
         return [id, rec.content, ...rec.tags, ...rec.keywords].join('\n').toLowerCase().includes(text)
       })
       .sort(([, a], [, b]) => b.lastAccessAt - a.lastAccessAt || b.createdAt - a.createdAt)
+    const groupCounts = new Map()
+    for (const [, rec] of filtered) {
+      const projectId = getProjectId(rec)
+      groupCounts.set(projectId, (groupCounts.get(projectId) ?? 0) + 1)
+    }
+    const projectIds = [...groupCounts.keys()].sort((a, b) => {
+      if (a === b) return 0
+      if (typeof raw.projectId === 'string') {
+        if (a === raw.projectId) return -1
+        if (b === raw.projectId) return 1
+      }
+      return (a ?? '').localeCompare(b ?? '')
+    })
+    if (raw.groupBy === 'project') {
+      // 固定项目顺序后稳定排序，避免同一项目在多页中反复交错。
+      const positions = new Map(projectIds.map((projectId, index) => [projectId, index]))
+      filtered.sort(([, a], [, b]) => positions.get(getProjectId(a)) - positions.get(getProjectId(b)))
+    }
     const items = filtered.slice(offset, offset + limit).map(([id, rec]) => ({
       id,
       kind: rec.kind,
@@ -1384,7 +1449,8 @@ class SleepMemoryApiService {
       supersededBy: rec.supersededBy,
       edges: rec.edges.map((edge) => ({ target: edge.target, relation: edge.relation, weight: edge.weight })),
     }))
-    return { items, total: filtered.length, offset, limit }
+    return { items, total: filtered.length, offset, limit,
+      groups: projectIds.map((projectId) => ({ projectId, total: groupCounts.get(projectId) })) }
   }
 
   /** 展开全部关联边（含 dream-associate 与 consolidates，含已 superseded 记录的边）。 */
@@ -1662,6 +1728,7 @@ export function apply(ctx, config) {
   // 服务缺失或注册失败不影响任何工具与注入路径。
   new SleepMemoryApiService(ctx, {
     openRecords: records,
+    workspaceScopes,
     runSleepCycle: (dryRun) => runMemorySleep(dryRun),
     status, scope: (args) => withMutation(() => manageScope(args)),
     manage: (args) => withMutation(() => manageExtended(args)),

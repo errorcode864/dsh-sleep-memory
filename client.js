@@ -65,7 +65,7 @@ window.__ModuleLoader__.load({
       'sleep-memory.panel': '记忆银行',
       'sleep-memory.page.title': '记忆银行',
 
-      'sleep-memory.stats.title': '库概况',
+      'sleep-memory.stats.title': '全库概览',
       'sleep-memory.stats.total': '{n} 条活记录',
       'sleep-memory.stats.superseded': '{n} 条未参与自动召回',
       'sleep-memory.stats.edges': '{n} 条联想边',
@@ -296,7 +296,7 @@ window.__ModuleLoader__.load({
 .sm-tab[aria-selected="true"] { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-weight: 600; }
 .sm-tab:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); outline-offset: -1px; }
 
-.sm-rows { display: flex; flex-direction: column; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); overflow: hidden; }
+.sm-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); overflow: hidden; }
 .sm-row { display: flex; flex-direction: column; gap: 5px; padding: 10px 14px; }
 .sm-row + .sm-row { border-top: 1px solid var(--dsw-alias-border-l1); }
 .sm-rowhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -361,7 +361,24 @@ window.__ModuleLoader__.load({
 .sm-management .sm-btn { margin: 4px 8px 4px 0; }
 .sm-management p { margin: 10px 0; }
 .sm-management [role="status"] { padding: 10px; margin-top: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm); }
-.sm-project-filter { flex: 1 1 200px; min-width: 140px; width: auto; }
+.sm-project-picker { position: relative; flex: 0 1 220px; min-width: 160px; }
+.sm-project-picker > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; width: 100%; }
+.sm-project-picker > summary::-webkit-details-marker { display: none; }
+.sm-project-picker > summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-project-menu { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); padding: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-shadow-lv2); }
+.sm-project-options { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; margin-top: 8px; }
+.sm-project-option { width: 100%; height: auto; min-height: 32px; justify-content: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.sm-project-option[aria-pressed="true"] { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.sm-project-message { margin: 8px 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-group-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-group-toggle input { margin: 0; accent-color: var(--dsw-alias-brand-primary); }
+.sm-project-group { border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.sm-project-group + .sm-project-group { margin-top: 12px; }
+.sm-project-group > summary { padding: 10px 14px; font-size: 13px; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.sm-project-group > summary .sm-count { margin-left: 8px; font-weight: 400; }
+.sm-project-group .sm-rows { border: 0; border-top: 1px solid var(--dsw-alias-border-l1); border-radius: 0; }
+.sm-tag-more { height: 20px; padding: 0 5px; font-size: 11px; }
+.sm-stats-scope { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .sm-btn-quiet { border-color: transparent; background: transparent; color: var(--dsw-alias-label-secondary); }
 .sm-runtime-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; min-height: 32px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
 .sm-runtime-state { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
@@ -669,8 +686,70 @@ window.__ModuleLoader__.load({
             h('span', { className: 'sm-rowmeta' }, Math.round(clamp01(value) * 100)));
         }
 
+        /** 标签优先展示，关键词补充；大小写和空白差异不重复占用列表空间。 */
+        function collectRecordLabels(item) {
+          const seen = new Set();
+          return [...(item.tags ?? []), ...(item.keywords ?? [])].map((label) => String(label).trim()).filter((label) => {
+            const key = label.toLowerCase();
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+
+        /** 项目由全库记录提供，工作区名称仅作展示，不推断或修改历史归属。 */
+        function ProjectPicker({ projects, projectId, globalOnly, onChange }) {
+          const [search, setSearch] = useState('');
+          const pickerRef = useRef(null);
+          const searchRef = useRef(null);
+          const selected = globalOnly ? '全局记忆' : projectId
+            ? projects.find((project) => project.projectId === projectId)?.title ?? projectId : '全部项目';
+          useEffect(() => {
+            const dismiss = (event) => {
+              if (pickerRef.current?.open && !pickerRef.current.contains(event.target)) pickerRef.current.open = false;
+            };
+            document.addEventListener('pointerdown', dismiss);
+            return () => document.removeEventListener('pointerdown', dismiss);
+          }, []);
+          const choose = (nextProjectId, nextGlobalOnly) => {
+            onChange({ projectId: nextProjectId, globalOnly: nextGlobalOnly });
+            setSearch('');
+            if (pickerRef.current) {
+              pickerRef.current.open = false;
+              pickerRef.current.querySelector('summary').focus();
+            }
+          };
+          const text = search.trim().toLowerCase();
+          const matches = projects.filter((project) => project.projectId !== null
+            && [project.title, project.projectId].some((value) => value.toLowerCase().includes(text)));
+          return h('details', {
+            className: 'sm-project-picker', ref: pickerRef,
+            onToggle: (event) => { if (event.currentTarget.open) searchRef.current?.focus(); },
+            onKeyDown: (event) => {
+              if (event.key !== 'Escape') return;
+              event.stopPropagation();
+              if (pickerRef.current) { pickerRef.current.open = false; pickerRef.current.querySelector('summary').focus(); }
+            },
+          },
+          h('summary', { className: 'sm-btn sm-btn-outline', 'aria-label': '项目筛选', title: selected },
+            h('span', null, selected), h('span', { 'aria-hidden': true }, '⌄')),
+          h('div', { className: 'sm-project-menu' },
+            h('input', { ref: searchRef, className: 'sm-search', type: 'search', value: search,
+              'aria-label': '搜索项目', placeholder: '搜索项目名称或标识', onChange: (event) => setSearch(event.target.value) }),
+            h('div', { className: 'sm-project-options', role: 'group', 'aria-label': '项目范围' },
+              h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-project-option',
+                'aria-pressed': !projectId && !globalOnly, onClick: () => choose('', false) }, '全部项目'),
+              h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-project-option',
+                'aria-pressed': globalOnly, onClick: () => choose('', true) }, '全局记忆'),
+              ...matches.map((project) => h('button', { key: project.projectId, type: 'button',
+                className: 'sm-btn sm-btn-quiet sm-project-option', title: project.projectId,
+                'aria-pressed': !globalOnly && projectId === project.projectId,
+                onClick: () => choose(project.projectId, false) }, project.title))),
+            matches.length === 0 ? h('p', { className: 'sm-project-message' }, text ? '没有匹配的项目' : '暂无项目专属记忆') : null));
+        }
+
         /** 列表只保留摘要，原文、来源与纠正管理在统一弹窗中查看。 */
-        function RecordRow({ item, onChanged }) {
+        function RecordRow({ item, onChanged, projectTitle, hideProject = false }) {
           const [detailOpen, setDetailOpen] = useState(false);
           const [detail, setDetail] = useState(null);
           const [detailBusy, setDetailBusy] = useState(false);
@@ -689,6 +768,7 @@ window.__ModuleLoader__.load({
             }
           };
           const kindLabel = item.kind === 'fact' ? t('sleep-memory.kind.fact') : t('sleep-memory.kind.experience');
+          const labels = collectRecordLabels(item);
           const salient = item.layer === 'salient' && Number.isFinite(Number(item.valence));
           const meta = [
             relTime(item.lastAccessAt) || relTime(item.createdAt),
@@ -698,7 +778,8 @@ window.__ModuleLoader__.load({
           ].filter(Boolean).join(' · ');
           return h('li', { className: 'sm-row', key: item.id },
             h('div', { className: 'sm-rowtop' },
-              h('span', { className: 'sm-rowmeta' }, `范围：${item.projectId ?? '全局'} · ${STATE_LABELS[item.lifecycle?.state ?? 'active']}`),
+              h('span', { className: 'sm-rowmeta' },
+                `${hideProject ? '' : `范围：${projectTitle ?? item.projectId ?? '全局'} · `}${STATE_LABELS[item.lifecycle?.state ?? 'active']}`),
               h('button', {
                 type: 'button', className: 'sm-btn sm-btn-quiet sm-record-open', disabled: detailBusy,
                 onClick: () => { setDetailOpen(true); void loadDetail(); },
@@ -713,14 +794,12 @@ window.__ModuleLoader__.load({
               h('span', { className: 'sm-spring' }),
               h('span', { className: 'sm-rowmeta' }, meta)),
             h('div', { className: 'sm-rowcontent', title: item.content }, item.content),
-            (Array.isArray(item.tags) && item.tags.length > 0) || (Array.isArray(item.keywords) && item.keywords.length > 0)
+            labels.length > 0
               ? h('div', { className: 'sm-rowtags' },
-                (item.tags ?? []).map((tag) => h('span', { className: 'sm-tag', key: `t:${tag}` }, tag)),
-                (item.keywords ?? []).map((kw) => h('span', { className: 'sm-tag', key: `k:${kw}` }, kw)))
+                labels.slice(0, 4).map((label) => h('span', { className: 'sm-tag', key: label }, label)),
+                labels.length > 4 ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-tag-more',
+                  'aria-label': `查看全部 ${labels.length} 个标签`, onClick: () => { setDetailOpen(true); void loadDetail(); } }, `+${labels.length - 4}`) : null)
               : null,
-            h('div', { className: 'sm-bars' },
-              h(MiniBar, { label: t('sleep-memory.row.importance'), value: item.importance }),
-              h(MiniBar, { label: t('sleep-memory.row.strength'), value: item.strength })),
             h(MemoryDialog, { id: `sm-record-${item.id}`, title: '原文与来源', open: detailOpen, onClose: () => setDetailOpen(false) },
               detailBusy ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取原文…') : null,
               detailError ? h('div', { className: 'sm-runtime-error', role: 'alert' },
@@ -730,6 +809,11 @@ window.__ModuleLoader__.load({
                 h('section', { className: 'sm-record-section', 'aria-label': '记忆原文' },
                   h('h3', null, '记忆原文'),
                   h('p', { className: 'sm-record-original' }, detail.record.content),
+                  h('div', { className: 'sm-bars' },
+                    h(MiniBar, { label: t('sleep-memory.row.importance'), value: detail.record.importance }),
+                    h(MiniBar, { label: t('sleep-memory.row.strength'), value: detail.record.strength })),
+                  labels.length ? h('div', { className: 'sm-rowtags', 'aria-label': '全部标签与关键词' },
+                    collectRecordLabels(detail.record).map((label) => h('span', { className: 'sm-tag', key: label }, label))) : null,
                   h('dl', { className: 'sm-runtime-info sm-record-provenance' },
                     h('div', null, h('dt', null, '记忆 ID'), h('dd', null, detail.record.id)),
                     h('div', null, h('dt', null, '范围'), h('dd', null, detail.record.projectId ?? '全局')),
@@ -956,7 +1040,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sm-statrow' },
               h('div', { className: 'sm-layers' },
                 LAYERS.map((layer) => h('span', { className: 'sm-badge is-layer', key: layer },
-                  `${t(`sleep-memory.layer.${layer}`)} ${stats?.byLayer?.[layer] ?? 0}`)))));
+                  `${t(`sleep-memory.layer.${layer}`)} ${stats?.byLayer?.[layer] ?? 0}`))),
+              h('span', { className: 'sm-stats-scope' }, t('sleep-memory.stats.title'))));
         }
 
         /** Salient valence×arousal scatter: ✦ positive and ⚠️ negative coloring. */
@@ -1163,6 +1248,8 @@ window.__ModuleLoader__.load({
           const [validity, setValidity] = useState('active');
           const [projectFilter, setProjectFilter] = useState('');
           const [globalOnly, setGlobalOnly] = useState(false);
+          const [grouped, setGrouped] = useState(false);
+          const [groups, setGroups] = useState([]);
           const [queryInput, setQueryInput] = useState('');
           const [query, setQuery] = useState('');
           const [items, setItems] = useState(null);
@@ -1180,6 +1267,11 @@ window.__ModuleLoader__.load({
           const [previewing, setPreviewing] = useState(false);
           const [report, setReport] = useState(null);
           const runtime = useRuntimeStatus(sleeping);
+          const groupResults = grouped || Boolean(projectFilter && !globalOnly);
+          const projects = stats?.projects ?? [];
+          const projectName = (projectId) => projectId === null
+            ? (projectFilter && !globalOnly ? '全局公共记忆' : '全局记忆')
+            : projects.find((project) => project.projectId === projectId)?.title ?? projectId;
 
           useEffect(() => {
             if (queryTimer.current) clearTimeout(queryTimer.current);
@@ -1197,23 +1289,27 @@ window.__ModuleLoader__.load({
                 limit: PAGE_SIZE,
                 offset: targetPage * PAGE_SIZE,
                 state: validity,
-                ...(globalOnly ? { projectId: null } : projectFilter.trim() ? { projectId: projectFilter.trim() } : {}),
+                ...(globalOnly ? { projectId: null } : projectFilter ? { projectId: projectFilter, includeGlobal: true } : {}),
+                ...(groupResults ? { groupBy: 'project' } : {}),
               });
               if (request !== listRequest.current) return;
               const next = Array.isArray(outcome?.items) ? outcome.items : [];
               setTotal(outcome?.total ?? 0);
+              setGroups(Array.isArray(outcome?.groups) ? outcome.groups : []);
               setItems((prev) => (append && Array.isArray(prev) ? [...prev, ...next] : next));
               setPage(targetPage);
             } catch (error) {
               if (request !== listRequest.current) return;
-              if (!append) setItems([]);
+              if (!append) { setItems([]); setTotal(0); setGroups([]); }
               showToast(`${t('sleep-memory.toast.failed')}：${error?.message ?? error}`, true);
             } finally {
               if (request === listRequest.current) setLoading(false);
             }
-          }, [layer, query, validity, projectFilter, globalOnly, t]);
+          }, [layer, query, validity, projectFilter, globalOnly, groupResults, t]);
 
           useEffect(() => {
+            setItems(null);
+            setGroups([]);
             void loadPage(0, false);
           }, [loadPage]);
 
@@ -1235,6 +1331,11 @@ window.__ModuleLoader__.load({
 
           const hasMore = items !== null && items.length < total;
           const filterActive = layer !== 'all' || query !== '' || validity !== 'active' || projectFilter !== '' || globalOnly;
+          const onRecordsChanged = () => { void loadPage(0, false); reloadStats(); reloadEdges(); };
+          const renderRows = (records, hideProject = false) => h('ul', { className: 'sm-rows' },
+            records.map((item) => h(RecordRow, {
+              item, key: item.id, projectTitle: projectName(item.projectId ?? null), hideProject, onChanged: onRecordsChanged,
+            })));
 
           let browseBody;
           if (items === null && loading) {
@@ -1248,10 +1349,23 @@ window.__ModuleLoader__.load({
               onAction: () => { setQueryInput(''); setQuery(''); setLayer('all'); setValidity('active'); setProjectFilter(''); setGlobalOnly(false); },
             });
           } else {
+            const loadedGroups = new Map();
+            for (const item of items ?? []) {
+              const projectId = item.projectId ?? null;
+              if (!loadedGroups.has(projectId)) loadedGroups.set(projectId, []);
+              loadedGroups.get(projectId).push(item);
+            }
+            const groupTotals = new Map(groups.map((group) => [group.projectId, group.total]));
             browseBody = h(React.Fragment, null,
-              h('ul', { className: 'sm-rows' }, (items ?? []).map((item) => h(RecordRow, {
-                item, key: item.id, onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); },
-              }))),
+              groupResults ? h('div', { 'aria-label': '按项目分组的记忆' },
+                [...loadedGroups].map(([projectId, records]) => h('details', {
+                  className: 'sm-project-group', key: JSON.stringify(projectId), open: true,
+                },
+                h('summary', null, projectName(projectId),
+                  h('span', { className: 'sm-count' }, `${groupTotals.get(projectId) ?? records.length} 条`),
+                  (groupTotals.get(projectId) ?? 0) > records.length
+                    ? h('span', { className: 'sm-count' }, `已加载 ${records.length} 条`) : null),
+                renderRows(records, true)))) : renderRows(items ?? []),
               hasMore ? h('div', { style: { display: 'flex', justifyContent: 'center', padding: '10px 0 0' } },
                 h('button', {
                   type: 'button', className: 'sm-btn sm-btn-outline',
@@ -1266,7 +1380,7 @@ window.__ModuleLoader__.load({
                 h('h1', { className: 'sm-title' }, t('sleep-memory.page.title')),
                 h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', onClick: () => setManagementView('status') }, '管理')),
 
-              h(StatsCard, { stats, onRefresh: reloadStats }),
+              h(StatsCard, { stats, onRefresh: onRecordsChanged }),
               h(RuntimeSummary, { ...runtime, sleeping, onOpen: () => setManagementView('status') }),
 
               h(SleepBanner, { report, onDismiss: () => setReport(null) }),
@@ -1304,9 +1418,13 @@ window.__ModuleLoader__.load({
 
               view === 'browse' ? h(React.Fragment, null,
                 h('div', { className: 'sm-listhead' },
-                  h('h2', { className: 'sm-listtitle' }, t('sleep-memory.browse.title')),
+                  h('h2', { className: 'sm-listtitle' }, '筛选结果'),
                   h('span', { className: 'sm-count' }, t('sleep-memory.browse.count', { n: total })),
-                  h('span', { className: 'sm-spring' })),
+                  hasMore ? h('span', { className: 'sm-count' }, `已加载 ${items.length} 条`) : null,
+                  h('span', { className: 'sm-spring' }),
+                  !projectFilter && !globalOnly ? h('label', { className: 'sm-group-toggle' },
+                    h('input', { type: 'checkbox', checked: grouped, onChange: (event) => setGrouped(event.target.checked) }), '按项目分组')
+                    : projectFilter && !globalOnly ? h('span', { className: 'sm-count' }, '包含全局公共记忆') : null),
                 h('div', { className: 'sm-toolbar' },
                   h('div', { className: 'sm-toolbar-grow' },
                     h('input', {
@@ -1318,9 +1436,8 @@ window.__ModuleLoader__.load({
                   h('select', { className: 'sm-select', value: validity, 'aria-label': '有效性筛选', onChange: (event) => setValidity(event.target.value) },
                     ...Object.entries(STATE_LABELS).map(([key, label]) => h('option', { key, value: key }, label)),
                     h('option', { value: 'all' }, '全部历史')),
-                  h('input', { className: 'sm-search sm-project-filter', value: projectFilter, disabled: globalOnly, placeholder: '项目标识，留空浏览全部项目',
-                    'aria-label': '项目筛选', onChange: (event) => setProjectFilter(event.target.value) }),
-                  h('label', null, h('input', { type: 'checkbox', checked: globalOnly, onChange: (event) => setGlobalOnly(event.target.checked) }), '仅全局'),
+                  h(ProjectPicker, { projects, projectId: projectFilter, globalOnly,
+                    onChange: (selection) => { setProjectFilter(selection.projectId); setGlobalOnly(selection.globalOnly); } }),
                   h('select', {
                     id: 'sm-layer', className: 'sm-select', value: layer,
                     'aria-label': t('sleep-memory.filter.label'),
@@ -1328,6 +1445,7 @@ window.__ModuleLoader__.load({
                   },
                   h('option', { value: 'all' }, t('sleep-memory.filter.all')),
                   LAYERS.map((name) => h('option', { key: name, value: name }, t(`sleep-memory.layer.${name}`))))),
+                stats?.projectError ? h('p', { className: 'sm-runtime-note', role: 'status' }, stats.projectError) : null,
                 browseBody) : null,
 
               view === 'scatter' ? h('div', { className: 'sm-listhead' },
