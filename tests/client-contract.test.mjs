@@ -14,6 +14,7 @@ async function createClient(host) {
     let pendingEffects = []
     const cleanups = []
     const registrations = []
+    const slotRegistrations = []
     const calls = []
     const downloads = []
     const revoked = []
@@ -49,8 +50,9 @@ async function createClient(host) {
             inject: (_key, callback) => callback(),
             register: (options, component) => {
                 if (options.name === 'plugins.bundle.config') {
-                    assert.equal(options.key, manifest.name, '配置槽必须使用安装包名')
+                    assert.ok([manifest.name, '@errorcode864/dsh-sleep-memory'].includes(options.key), '配置槽应匹配规范包名或已有安装别名')
                 }
+                slotRegistrations.push(options)
                 components.set(options.name, component)
                 return () => {}
             },
@@ -82,7 +84,7 @@ async function createClient(host) {
         setTimeout, clearTimeout, setInterval, clearInterval, console,
     })
     return {
-        components, registrations, calls, downloads, revoked,
+        components, registrations, slotRegistrations, calls, downloads, revoked,
         async render(component, props = {}, effects = false) {
             current = component
             cursor = 0
@@ -271,9 +273,111 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
         assert.ok(flatten(row).some((node) => node.type === 'p' && node.children.includes(host.table.get('smm_a').content)))
         assert.ok(client.calls.some((call) => call.method === 'getRecord' && call.args[0].id === 'smm_a'))
         const runtime = flatten(tree).find((node) => node.type?.name === 'RuntimeStatus')
-        await client.render(runtime.type, {}, true)
-        const statusTree = await client.render(runtime.type)
+        const statusTree = await client.render(runtime.type, runtime.props)
         assert.equal(statusTree.props['aria-label'], '记忆运行状态')
         assert.ok(client.calls.some((call) => call.method === 'status'))
+    } finally { client.dispose() }
+})
+
+test('运行摘要覆盖加载、定时关闭、整理中、失败和读取失败，详情默认收起零计数', async () => {
+    const host = createHarness()
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const summary = flatten(page).find((node) => node.type?.name === 'RuntimeSummary')
+        const runtime = flatten(page).find((node) => node.type?.name === 'RuntimeStatus')
+        const state = await host.api.status()
+        const cases = [
+            { props: { state: null }, expected: '正在读取运行状态…' },
+            { props: { state: { ...state, nextSleepAt: null } }, expected: '定时整理未启用' },
+            { props: { state: { ...state, nextSleepAt: Date.now() } }, expected: '下次整理' },
+            { props: { state, sleeping: true }, expected: '正在整理记忆' },
+            { props: { state: { ...state, lastSleepError: { message: '模型不可用' } } }, expected: '上次整理失败', error: true },
+            { props: { state: { ...state, schedule: { ...state.schedule, lastError: '调度中断' } } }, expected: '上次整理失败', error: true },
+            { props: { state, error: '服务不可用' }, expected: '状态读取失败', error: true },
+        ]
+        for (const entry of cases) {
+            const tree = await client.render(summary.type, entry.props)
+            assert.ok(flatten(tree).some((node) => node.children.some((text) => typeof text === 'string' && text.includes(entry.expected))))
+            assert.equal(tree.props.className.includes('is-error'), entry.error ?? false)
+            assert.equal(flatten(tree).some((node) => node.type === 'details'), false)
+        }
+        const tree = await client.render(runtime.type, { state })
+        const counts = flatten(tree).find((node) => node.type === 'details')
+        assert.equal(counts.props.open, undefined, '诊断计数初始应保持折叠')
+        assert.ok(flatten(tree).some((node) => node.children.includes('本次加载暂无运行记录。')))
+        assert.ok(flatten(tree).some((node) => node.type === 'dd' && node.children.includes('全局')))
+    } finally { client.dispose() }
+})
+
+test('管理弹窗由摘要和标题打开，分类切换与关闭保持列表筛选及表单挂载', async () => {
+    const client = await createClient(createHarness())
+    try {
+        const main = client.components.get('main')
+        let page = await client.render(main)
+        const dialogNode = () => flatten(page).find((node) => node.type?.name === 'MemoryDialog' && node.props.id === 'sm-manager')
+        const visiblePanel = () => flatten(page).find((node) => node.props.id?.startsWith('sm-manager-') && !node.props.hidden)
+        assert.equal(dialogNode().props.open, false)
+        flatten(page).find((node) => node.props['aria-label'] === '项目筛选').props.onChange({ target: { value: '项目甲' } })
+        flatten(page).find((node) => node.children.includes('管理')).props.onClick()
+        page = await client.render(main)
+        assert.equal(dialogNode().props.open, true)
+        assert.equal(visiblePanel().props.id, 'sm-manager-status')
+        for (const [label, id] of [['会话范围', 'scope'], ['备份恢复', 'backup']]) {
+            flatten(page).find((node) => node.type === 'button' && node.children.includes(label)).props.onClick()
+            page = await client.render(main)
+            assert.equal(visiblePanel().props.id, `sm-manager-${id}`)
+            assert.ok(flatten(page).some((node) => node.type?.name === 'ScopePanel'))
+            assert.ok(flatten(page).some((node) => node.type?.name === 'BackupPanel'))
+        }
+        dialogNode().props.onClose()
+        page = await client.render(main)
+        assert.equal(dialogNode().props.open, false)
+        assert.equal(flatten(page).find((node) => node.props['aria-label'] === '项目筛选').props.value, '项目甲')
+        flatten(page).find((node) => node.type?.name === 'RuntimeSummary').props.onOpen()
+        page = await client.render(main)
+        assert.equal(visiblePanel().props.id, 'sm-manager-status')
+    } finally { client.dispose() }
+})
+
+test('配置入口覆盖规范包名、旧安装别名，以及 bundle 和组件行详情', async () => {
+    const client = await createClient(createHarness())
+    try {
+        const keys = new Set(client.slotRegistrations.map((options) => `${options.name}:${options.key}`))
+        for (const name of ['dsh-sleep-memory', '@errorcode864/dsh-sleep-memory']) {
+            assert.ok(keys.has(`plugins.bundle.config:${name}`))
+            assert.ok(keys.has(`plugins.row.config:${name}#sleep-memory`))
+        }
+        assert.equal(client.slotRegistrations.filter((options) => options.name === 'main').length, 1)
+    } finally { client.dispose() }
+})
+
+test('原文入口为行内按钮，详情在独立弹窗展示且关闭后保留列表摘要', async () => {
+    const host = createHarness()
+    await host.table.put('smm_dialog', fixture('smm_dialog', {
+        source: { kind: 'user', confirmed: true, sessionId: '会话甲', messageId: '消息甲' },
+    }))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const rowNode = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        let row = await client.render(rowNode.type, rowNode.props)
+        const opener = flatten(row).find((node) => node.type === 'button' && node.children.includes('查看原文与来源'))
+        assert.ok(opener.props.className.includes('sm-record-open'))
+        assert.ok(row.children.some((node) => node?.props.className === 'sm-rowtop' && flatten(node).includes(opener)))
+        opener.props.onClick()
+        await flushTasks()
+        row = await client.render(rowNode.type, rowNode.props)
+        const dialog = flatten(row).find((node) => node.type?.name === 'MemoryDialog')
+        assert.equal(dialog.props.open, true)
+        assert.equal(dialog.props.title, '原文与来源')
+        assert.ok(flatten(dialog).some((node) => node.type === 'dd' && node.children.includes('会话甲')))
+        assert.ok(flatten(dialog).some((node) => node.type === 'dd' && node.children.includes('已确认')))
+        dialog.props.onClose()
+        row = await client.render(rowNode.type, rowNode.props)
+        assert.equal(flatten(row).find((node) => node.type?.name === 'MemoryDialog').props.open, false)
+        assert.ok(flatten(row).some((node) => node.props.className === 'sm-rowcontent' && node.children.includes(host.table.get('smm_dialog').content)))
     } finally { client.dispose() }
 })

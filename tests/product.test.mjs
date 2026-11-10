@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHarness, createMessage, fixture, flushTasks, injectMessage, mockAffect } from './harness.mjs'
 import { backupChecksum, exportMemoryBackup } from '../memory-contract.js'
-import { initialSchedule, nextSleepTime } from '../memory-runtime.js'
+import { initialSchedule, listWorkspaceScopes, nextSleepTime } from '../memory-runtime.js'
 
 const DAY = 86_400_000
 const execution = (id) => ({ agent: { id, session: { id } } })
@@ -13,6 +13,18 @@ const workspaceRegistry = {
     ],
 }
 const services = { get: (key) => key === 'workspaceRegistry' ? workspaceRegistry : undefined }
+
+test('工作区可选服务通过安全查询读取，避免触发宿主属性注入检查', () => {
+    const context = new Proxy({ get: services.get }, {
+        get(target, key) {
+            if (key === 'workspaceRegistry') throw new Error('未声明注入时禁止直接读取工作区属性')
+            return Reflect.get(target, key)
+        },
+    })
+    assert.deepEqual(listWorkspaceScopes(context).map((entry) => entry.projectId), ['workspace:wa', 'workspace:wb'])
+    assert.deepEqual(listWorkspaceScopes({ get: () => undefined }), [])
+    assert.throws(() => listWorkspaceScopes({ get: () => ({ list() { throw new Error('工作区读取失败') } }) }), /工作区读取失败/)
+})
 
 async function setState(harness, id, state, reason = '用户确认适用条件发生变化') {
     const input = { action: 'setState', id, state, reason, projectId: null }

@@ -28,5 +28,5 @@ source_of_truth: code-and-decision
 
 - [进入指南与运维领域索引](guides/README.md)
   - [npm 发布与远端更新](guides/package-updates.md)（runbook，active，更新于 2026-11-10）
-  - [可靠记忆使用与验证](guides/reliability.md)（guide，active，更新于 2026-11-09）
+  - [可靠记忆使用与验证](guides/reliability.md)（guide，active，更新于 2026-11-10）
 <!-- DOCS-INDEX:END -->

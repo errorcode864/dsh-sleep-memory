@@ -24,5 +24,5 @@ source_of_truth: code-and-script
 | 类型 | 文档 | 状态 | 更新日期 |
 | --- | --- | --- | --- |
 | runbook | [npm 发布与远端更新](package-updates.md) | active | 2026-11-10 |
-| guide | [可靠记忆使用与验证](reliability.md) | active | 2026-11-09 |
+| guide | [可靠记忆使用与验证](reliability.md) | active | 2026-11-10 |
 <!-- DOCS-INDEX:END -->

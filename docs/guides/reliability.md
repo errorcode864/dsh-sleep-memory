@@ -3,7 +3,8 @@ id: sleep-memory.guides.reliability
 title: 可靠记忆使用与验证
 type: guide
 status: active
-updated: 2026-11-09
+owner: maintainer
+updated: 2026-11-10
 source_of_truth: code-and-script
 ---
 
@@ -39,7 +40,8 @@ source_of_truth: code-and-script
 ```
 
 `scope` 查询解析结果和来源；`bind` 可省略 sessionId 使用当前工具会话。
-`release: true` 释放显式绑定，恢复工作区或配置回退。GUI 可填写或选择会话 ID，
+`release: true` 释放显式绑定，恢复工作区或配置回退。GUI 在记忆银行右上角的
+“管理 → 会话范围”中填写或选择会话 ID，
 展示绑定结果和来源；未指定会话时显示配置回退范围，不冒充当前活跃会话。
 绑定仅影响之后的读写，不迁移旧记录；宿主工作区 ID 不保证跨机器一致。
 会话与绑定列表最多返回 500 条，具体会话仍可直接输入 ID 查询。
@@ -134,6 +136,8 @@ source_of_truth: code-and-script
 
 ## 备份与恢复
 
+GUI 从记忆银行的“管理 → 备份恢复”进入，导出和导入流程集中在管理弹窗。
+
 1. `memory_manage { "action": "export" }` 返回完整 `backup` 对象。
 2. 将整个对象保存为 UTF-8 JSON，包含 `format/version/exportedAt/records/checksum`。
 3. 目标 profile 调用 `memory_manage { "action": "import", "backup": ... }`，默认只预演。
@@ -154,6 +158,15 @@ source_of_truth: code-and-script
 
 ## 运行和兼容
 
+- 记忆银行首页仅展示单行运行摘要与下次整理时间；失败时显示“查看原因”入口。
+  点击“运行详情”或右上角“管理”打开居中弹窗，分类切换保留表单状态；点击“关闭”、
+  按 Esc 或点击遮罩可返回记忆列表。诊断计数默认折叠，全为 0 时提示暂无运行记录。
+- 每条记忆右上角的“查看原文与来源”打开同样样式的弹窗，展示完整原文、
+  来源元数据、纠正链及来源记录；关闭后保留列表位置。
+- 插件管理页的配置区兼容 `dsh-sleep-memory` 与旧依赖别名
+  `@errorcode864/dsh-sleep-memory`，bundle 详情和所含组件的配置页均提供入口。
+- 工作区注册表通过可选服务查询读取；缺少该服务时回退配置范围，服务存在但
+  读取失败时仍报告错误，不会误落入全局范围。
 - `memory_runtime` v1 独立域保存会话绑定和 schedule。绑定键是会话 ID 的摘要，
   满足 JSON per-record 后端的文件名约束；记忆域仍为 `memory_bank` v1。
 - `status.schedule` 包含 lastSuccessAt/lastAttemptAt/retryAt/failures/lastError；
