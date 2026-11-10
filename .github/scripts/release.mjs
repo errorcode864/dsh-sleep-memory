@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url'
 const PACKAGE_NAME = 'dsh-sleep-memory'
 const REGISTRY_URL = 'https://registry.npmjs.org'
 const RELEASE_TAG_PATTERN = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+const REGISTRY_VERIFY_ATTEMPTS = 31
+const REGISTRY_VERIFY_INTERVAL_MS = 10_000
 
 export function parseReleaseTag(tag) {
     if (!RELEASE_TAG_PATTERN.test(tag ?? '')) {
@@ -16,7 +18,10 @@ export function parseReleaseTag(tag) {
 }
 
 export async function readRegistry(fetchRegistry = fetch) {
-    const response = await fetchRegistry(`${REGISTRY_URL}/${PACKAGE_NAME}`, {
+    // 发布后 CDN 仍可能缓存旧版本列表，每次核验使用独立查询避免持续命中旧缓存。
+    const url = new URL(`${REGISTRY_URL}/${PACKAGE_NAME}`)
+    url.searchParams.set('release-check', `${Date.now()}-${process.hrtime.bigint()}`)
+    const response = await fetchRegistry(url.href, {
         headers: { accept: 'application/json', 'cache-control': 'no-cache' },
         signal: AbortSignal.timeout(30_000),
     })
@@ -59,12 +64,14 @@ export function createReleaseState(tag, manifest, registry, runNumber) {
 export async function verifyReleaseState(tag, manifest, runNumber, query = readRegistry, wait = delay) {
     const required = ['published', 'dev_published', 'latest_tagged', 'dev_tagged']
     let missing
-    // Registry 的查询结果可能稍晚于发布操作可见，只对未同步状态做有限等待。
-    for (let attempt = 0; attempt < 6; attempt++) {
+    // npm 接受发布后仍可能异步处理数分钟，仅对缺失状态等待最多 5 分钟。
+    for (let attempt = 0; attempt < REGISTRY_VERIFY_ATTEMPTS; attempt++) {
         const state = createReleaseState(tag, manifest, await query(), runNumber)
         missing = required.filter((key) => !state[key])
         if (!missing.length) return state
-        if (attempt < 5) await wait(5_000)
+        if (attempt < REGISTRY_VERIFY_ATTEMPTS - 1) {
+            await wait(REGISTRY_VERIFY_INTERVAL_MS)
+        }
     }
     throw new Error(`npm 发布结果等待后仍不完整：${missing.join('、')}`)
 }

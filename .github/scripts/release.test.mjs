@@ -100,7 +100,35 @@ test('发布核验容许 Registry 短暂延迟，但最终必须补齐两个版�
     )
     assert.equal(state.dev_published, true)
     assert.equal(queries, 3)
-    assert.deepEqual(waits, [5_000, 5_000])
+    assert.deepEqual(waits, [10_000, 10_000])
+})
+
+test('发布后台处理超过旧等待窗口后仍能核验成功', async () => {
+    const complete = createRegistry(['0.4.0', '0.4.0-dev.21'], { latest: '0.4.0', dev: '0.4.0-dev.21' })
+    let queries = 0
+    const waits = []
+    await verifyReleaseState(
+        'v0.4.0', MANIFEST, 21,
+        async () => ++queries < 31 ? createRegistry() : complete,
+        async (milliseconds) => { waits.push(milliseconds) },
+    )
+    assert.equal(queries, 31)
+    assert.equal(waits.reduce((total, milliseconds) => total + milliseconds, 0), 300_000)
+})
+
+test('每次 Registry 查询独立缓存键且保留官方域名与包路径', async () => {
+    const urls = []
+    const fetchRegistry = async (url, options) => {
+        urls.push(new URL(url))
+        assert.equal(options.headers['cache-control'], 'no-cache')
+        return Response.json(createRegistry())
+    }
+    await readRegistry(fetchRegistry)
+    await readRegistry(fetchRegistry)
+    assert.equal(urls[0].origin, 'https://registry.npmjs.org')
+    assert.equal(urls[0].pathname, '/dsh-sleep-memory')
+    assert.ok(urls[0].searchParams.get('release-check'))
+    assert.notEqual(urls[0].href, urls[1].href)
 })
 
 test('持续缺失不能误报成功，Registry 异常不能被等待逻辑吞掉', async () => {
@@ -110,7 +138,7 @@ test('持续缺失不能误报成功，Registry 异常不能被等待逻辑吞�
         async () => { queries++; return createRegistry() },
         async () => {},
     ), /等待后仍不完整/)
-    assert.equal(queries, 6)
+    assert.equal(queries, 31)
     await assert.rejects(verifyReleaseState(
         'v0.4.0', MANIFEST, 21,
         async () => { throw new Error('HTTP 403') },

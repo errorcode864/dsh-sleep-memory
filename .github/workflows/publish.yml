@@ -160,6 +160,7 @@ jobs:
           fi
       - name: 核验发布结果
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.target.outputs.tag }}
           RELEASE_SOURCE: release-source
         run: |
