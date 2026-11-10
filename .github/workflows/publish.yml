@@ -1,24 +1,24 @@
 name: Release
 
-# A tag push starts the release: the maintainer bumps package.json and pushes
-# v<version>. The workflow packs once, publishes the same tree as
-# `<version>-dev.<run number>` under npm's `dev` tag so it can be tried at once,
-# runs the checks, writes the `dist` branch so a git install needs no build,
-# then promotes `<version>` as `latest` from the same tarball. Publishing uses
-# the `NPM_TOKEN` repository secret (npm Automation token); once the package
-# exists and a trusted publisher is configured on npm, the token can be replaced
-# by OIDC trusted publishing (add back `--provenance` and `id-token: write`).
+# Tag 自动发版；手动入口用当前工作流补建旧 Tag，保持 Tag 和已发布版本不变。
+# npm 使用 OIDC，需在包设置中允许本工作流直接发布和管理 dist-tags。
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布或补建的已有 Tag，例如 v0.4.0'
+        required: true
+        type: string
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -28,101 +28,141 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: 校验发布 Tag
+        id: target
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: node .github/scripts/release.mjs target
+      - name: 检出 Tag 对应源码
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.target.outputs.tag }}
+          path: release-source
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install --global npm@^11.5.1
-      - name: Check the tag names the package version
-        id: version
+          package-manager-cache: false
+      - name: 安装支持 OIDC 的 npm
+        run: npm install --global npm@11
+      - name: 验证发布工具与插件
         run: |
-          version="$(node -p "require('./package.json').version")"
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error title=Release::tag ${GITHUB_REF_NAME} does not name package.json's version ${version}"
-            exit 1
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-      - run: npm ci || npm install
-      - name: Read what is already out
+          node --test .github/scripts/release.test.mjs
+          npm --prefix release-source test
+          npm --prefix release-source run eval
+      - name: 分别检查正式版与 dev 版
         id: state
-        run: |
-          if npm view "${PKG}@${VERSION}" version > /dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-          if npm view "${PKG}@${VERSION}-dev.${GITHUB_RUN_NUMBER}" version > /dev/null 2>&1; then
-            echo "dev=published" >> "$GITHUB_OUTPUT"
-          else
-            echo "dev=" >> "$GITHUB_OUTPUT"
-          fi
         env:
-          PKG: dsh-sleep-memory
-          VERSION: ${{ steps.version.outputs.version }}
-      - name: Run regression tests
-        run: npm test
-      - name: Pack the release and its dev version
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          RELEASE_SOURCE: release-source
+        run: node .github/scripts/release.mjs state
+      - name: 打包并核对已发布内容
         id: pack
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.target.outputs.version }}
+          DEV_VERSION: ${{ steps.state.outputs.dev_version }}
+          PUBLISHED: ${{ steps.state.outputs.published }}
+          DEV_PUBLISHED: ${{ steps.state.outputs.dev_published }}
         run: |
-          mkdir -p .debug
-          npm pack --ignore-scripts --pack-destination .debug
-          tarball=".debug/dsh-sleep-memory-${VERSION}.tgz"
-          devtarball=".debug/dsh-sleep-memory-${VERSION}-dev.${GITHUB_RUN_NUMBER}.tgz"
-          # Rewrite the version field inside the dev tarball so npm accepts it.
-          rm -rf .debug/dev-pkg && mkdir -p .debug/dev-pkg
-          tar -xzf "${tarball}" -C .debug/dev-pkg
-          node -e "
-            const f = '.debug/dev-pkg/package/package.json';
-            const m = JSON.parse(require('node:fs').readFileSync(f, 'utf8'));
-            m.version = '${VERSION}-dev.${GITHUB_RUN_NUMBER}';
-            require('node:fs').writeFileSync(f, JSON.stringify(m, null, 2) + '\n');
-          "
-          npm pack .debug/dev-pkg/package --ignore-scripts --pack-destination .debug
-          mv ".debug/dev-pkg/dsh-sleep-memory-${VERSION}-dev.${GITHUB_RUN_NUMBER}.tgz" "${devtarball}" 2>/dev/null || true
+          artifacts="$(mktemp -d "${RUNNER_TEMP}/sleep-memory-release.XXXXXX")"
+          mkdir -p "${artifacts}/local" "${artifacts}/registry" "${artifacts}/dev" "${artifacts}/registry-dev"
+          npm pack "${GITHUB_WORKSPACE}/release-source" --ignore-scripts --pack-destination "${artifacts}"
+          tarball="${artifacts}/dsh-sleep-memory-${VERSION}.tgz"
+          tar -xzf "${tarball}" -C "${artifacts}/local"
+          if [ "${PUBLISHED}" = true ]; then
+            npm pack "dsh-sleep-memory@${VERSION}" --ignore-scripts --pack-destination "${artifacts}/registry"
+            tar -xzf "${artifacts}/registry/dsh-sleep-memory-${VERSION}.tgz" -C "${artifacts}/registry"
+            node .github/scripts/release.mjs compare "${artifacts}/local/package" "${artifacts}/registry/package"
+            # 补建使用 Registry 中的原始 tarball，避免重新打包改变正式版制品。
+            tarball="${artifacts}/registry/dsh-sleep-memory-${VERSION}.tgz"
+          fi
+          tar -xzf "${tarball}" -C "${artifacts}/dev"
+          DEV_PACKAGE="${artifacts}/dev/package/package.json" node --input-type=module -e '
+            import fs from "node:fs";
+            const file = process.env.DEV_PACKAGE;
+            const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+            manifest.version = process.env.DEV_VERSION;
+            fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+          '
+          npm pack "${artifacts}/dev/package" --ignore-scripts --pack-destination "${artifacts}"
+          devtarball="${artifacts}/dsh-sleep-memory-${DEV_VERSION}.tgz"
+          if [ "${DEV_PUBLISHED}" = true ]; then
+            npm pack "dsh-sleep-memory@${DEV_VERSION}" --ignore-scripts --pack-destination "${artifacts}/registry-dev"
+            tar -xzf "${artifacts}/registry-dev/dsh-sleep-memory-${DEV_VERSION}.tgz" -C "${artifacts}/registry-dev"
+            node .github/scripts/release.mjs compare "${artifacts}/dev/package" "${artifacts}/registry-dev/package"
+          fi
           echo "release=${tarball}" >> "$GITHUB_OUTPUT"
           echo "dev=${devtarball}" >> "$GITHUB_OUTPUT"
-      # Out at once, so the version can be installed and tried while the checks
-      # below run; a check that fails leaves the dev build where it is and
-      # promotes nothing.
-      - name: Publish the dev version
-        if: steps.state.outputs.published != 'true' && steps.state.outputs.dev == ''
+      - name: 发布缺失的 dev 版本
+        if: steps.state.outputs.dev_published != 'true'
         run: npm publish "${{ steps.pack.outputs.dev }}" --access public --tag dev
+      - name: 补齐 dev 通道
+        if: steps.state.outputs.dev_published == 'true' && steps.state.outputs.dev_tagged != 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Write the dist branch
+          DEV_VERSION: ${{ steps.state.outputs.dev_version }}
+        run: npm dist-tag add "dsh-sleep-memory@${DEV_VERSION}" dev
+      - name: 发布缺失的正式版
         if: steps.state.outputs.published != 'true'
-        run: |
-          rm -rf dist-branch && mkdir dist-branch
-          tar -xzf "${{ steps.pack.outputs.release }}" -C dist-branch
-          cd dist-branch/package
-          git init -q
-          git checkout -q -b dist
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -qm "dist: v${{ steps.version.outputs.version }}"
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push -q --force origin dist
+        run: npm publish "${{ steps.pack.outputs.release }}" --access public --tag latest
+      - name: 补齐 latest 通道
+        if: steps.state.outputs.published == 'true' && steps.state.outputs.latest_tagged != 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish to npm
-        if: steps.state.outputs.published != 'true'
-        run: npm publish "${{ steps.pack.outputs.release }}" --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Create the GitHub Release
-        if: steps.state.outputs.published != 'true'
+          VERSION: ${{ steps.target.outputs.version }}
+        run: npm dist-tag add "dsh-sleep-memory@${VERSION}" latest
+      - name: 同步 dist 分支并保留历史
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TARBALL: ${{ steps.pack.outputs.release }}
+          VERSION: ${{ steps.target.outputs.version }}
         run: |
-          notes=$(mktemp)
-          printf '安装：`dsh-sleep-memory@%s`\n\n完整变更见 [更新日志](https://github.com/%s/blob/main/docs/guides/package-updates.md)。\n' "${VERSION}" "${GITHUB_REPOSITORY}" > "${notes}"
-          gh release view "v${VERSION}" > /dev/null 2>&1 \
-            && gh release edit "v${VERSION}" --notes-file "${notes}" \
-            || gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --notes-file "${notes}"
+          distDirectory="$(mktemp -d "${RUNNER_TEMP}/sleep-memory-dist.XXXXXX")"
+          tar -xzf "${TARBALL}" -C "${distDirectory}"
+          cd "${distDirectory}/package"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          parent=""
+          if git ls-remote --exit-code --heads origin dist > /dev/null; then
+            git fetch --no-tags origin refs/heads/dist
+            parent="$(git rev-parse FETCH_HEAD)"
+          else
+            status=$?
+            if [ "${status}" -ne 2 ]; then exit "${status}"; fi
+          fi
+          git add -A
+          tree="$(git write-tree)"
+          if [ -n "${parent}" ] && [ "${tree}" = "$(git rev-parse "${parent}^{tree}")" ]; then
+            echo "dist 内容一致，跳过重复提交"
+          else
+            parents=()
+            if [ -n "${parent}" ]; then parents=(-p "${parent}"); fi
+            commit="$(git commit-tree "${tree}" "${parents[@]}" -m "dist: 发布 v${VERSION}")"
+            git update-ref refs/heads/dist "${commit}"
+            git push origin refs/heads/dist:refs/heads/dist
+          fi
+      - name: 补建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          if gh release view "${RELEASE_TAG}" > /dev/null 2>&1; then
+            echo "Release 已存在，保留现有说明"
+          else
+            notes="$(mktemp "${RUNNER_TEMP}/sleep-memory-notes.XXXXXX")"
+            printf '安装：`dsh-sleep-memory@%s`\n\n发布与更新指南：https://github.com/%s/blob/%s/docs/guides/package-updates.md\n' "${VERSION}" "${GITHUB_REPOSITORY}" "${RELEASE_TAG}" > "${notes}"
+            gh release create "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --notes-file "${notes}"
+          fi
+      - name: 核验发布结果
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          RELEASE_SOURCE: release-source
+        run: |
+          node .github/scripts/release.mjs verify
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/dist" --jq '.object.sha'
+          gh release view "${RELEASE_TAG}" --json url --jq '.url'
