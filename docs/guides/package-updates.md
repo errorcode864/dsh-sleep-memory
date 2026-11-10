@@ -7,7 +7,7 @@ owner: maintainer
 updated: 2026-11-10
 source_of_truth: code-and-config-and-external
 environment: GitHub Actions、npm 账号与远端 DSH profile
-verification: 正式版 0.4.0 已完成公共 Registry 安装验证；新版工作流通过本地验证后仍需远端运行验收
+verification: 2026-11-10 已通过 Actions 运行 42740185232，验证 OIDC 发布、npm 双通道、dist 制品一致性与 GitHub Release
 ---
 
 # npm 发布与远端更新
@@ -75,12 +75,16 @@ npm 发布及通道管理使用 **Trusted Publisher（OIDC）**，工作流不�
 工作流使用 GitHub 托管 Runner、Node 24 与 npm 11；无需额外的长期 npm Token。
 
 工作流和 `.github/scripts/` 必须一起提交到默认分支，才能使用新版手动入口。
-用户明确禁止代理执行 `git push`；文档中的推送命令均由维护者手动执行。
+推送命令由维护者执行，或在获得明确授权后由代理执行。
 
 ## 补建 0.4.0 的发布链路
 
 `dsh-sleep-memory@0.4.0` 已于 2026-11-09 正式发布并完成隔离安装验证。
-此前 CI 停在仅暂存 Token 的认证错误；新版工作流的远端执行结果仍需验收。
+2026-11-10 配置 Trusted Publisher 后，Actions 运行 `42740185232` 已通过完整链路：
+正式版保持不变，OIDC 发布 dev 版，dist 的 27 个文件与正式版一致，`v0.4.0`
+Release 已公开。首次验收发现 npm 后台处理延迟，核验已调整为最多等待 5 分钟。
+同一运行的第 2 次尝试也已通过：跳过已有版本发布，dist 不重复提交，保留现有 Release。
+以下步骤用于再次补建或排查：
 
 1. 按上节配置 npm Trusted Publisher。
 2. 将本次工作流、发布工具和文档提交到 `main`，维护者手动推送：
