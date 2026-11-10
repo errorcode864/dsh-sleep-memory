@@ -1,0 +1,4 @@
+- insert:
+    - id: sleep-memory
+      name: 'dsh-sleep-memory'
+      config: {}

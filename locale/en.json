@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sleep memory",
+    "description": "Persistent cross-session memory for agents: write, recall, sleep-time consolidation, forgetting, and store management."
+  }
+}
