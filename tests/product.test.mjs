@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHarness, createMessage, fixture, flushTasks, injectMessage, mockAffect } from './harness.mjs'
 import { backupChecksum, exportMemoryBackup } from '../memory-contract.js'
-import { initialSchedule, nextSleepTime } from '../memory-runtime.js'
+import { initialSchedule, listWorkspaceScopes, nextSleepTime } from '../memory-runtime.js'
 
 const DAY = 86_400_000
 const execution = (id) => ({ agent: { id, session: { id } } })
@@ -13,6 +13,76 @@ const workspaceRegistry = {
     ],
 }
 const services = { get: (key) => key === 'workspaceRegistry' ? workspaceRegistry : undefined }
+
+test('工作区可选服务通过安全查询读取，避免触发宿主属性注入检查', () => {
+    const context = new Proxy({ get: services.get }, {
+        get(target, key) {
+            if (key === 'workspaceRegistry') throw new Error('未声明注入时禁止直接读取工作区属性')
+            return Reflect.get(target, key)
+        },
+    })
+    assert.deepEqual(listWorkspaceScopes(context).map((entry) => entry.projectId), ['workspace:wa', 'workspace:wb'])
+    assert.deepEqual(listWorkspaceScopes({ get: () => undefined }), [])
+    assert.throws(() => listWorkspaceScopes({ get: () => ({ list() { throw new Error('工作区读取失败') } }) }), /工作区读取失败/)
+})
+
+test('全库项目目录保留真实归属，工作区提供名称且名称故障不阻断浏览', async () => {
+    const harness = createHarness({}, services)
+    await harness.table.put('smm_global', fixture('smm_global'))
+    await harness.table.put('smm_a', fixture('smm_a', { projectId: 'workspace:wa' }))
+    await harness.table.put('smm_review', fixture('smm_review', {
+        projectId: '归档项目', lifecycle: { state: 'review', reason: '需复核', at: Date.now(), revision: 1 },
+    }))
+    const stats = await harness.api.stats()
+    assert.equal(stats.total, 2)
+    assert.equal(stats.projects.find((project) => project.projectId === 'workspace:wa').title, '项目甲')
+    assert.equal(stats.projects.find((project) => project.projectId === null).title, '全局记忆')
+    assert.equal(stats.projects.find((project) => project.projectId === '归档项目').total, 1, '仅有非活跃记录的项目也应可选')
+    assert.equal(stats.projectError, null)
+    assert.equal(harness.table.get('smm_global').projectId, undefined, '读取目录不迁移旧记录')
+
+    const unavailable = createHarness({}, { get: () => ({ list() { throw new Error('工作区未就绪') } }) })
+    await unavailable.table.put('smm_b', fixture('smm_b', { projectId: 'workspace:wb' }))
+    const fallback = await unavailable.api.stats()
+    assert.equal(fallback.total, 1)
+    assert.equal(fallback.projects[0].title, 'workspace:wb')
+    assert.match(fallback.projectError, /显示项目标识/)
+})
+
+test('项目分组在分页前排序，数量覆盖完整筛选结果且选择项目可显式包含全局', async () => {
+    const harness = createHarness({}, services)
+    const now = Date.now()
+    for (let index = 0; index < 55; index++) {
+        await harness.table.put(`smm_a${index}`, fixture(`smm_a${index}`, {
+            projectId: 'workspace:wa', content: '部署参数', lastAccessAt: now - index * 2,
+        }))
+        await harness.table.put(`smm_b${index}`, fixture(`smm_b${index}`, {
+            projectId: 'workspace:wb', content: '部署参数', lastAccessAt: now - index * 2 - 1,
+        }))
+    }
+    await harness.table.put('smm_global', fixture('smm_global', { content: '部署公共约定', lastAccessAt: now + 1 }))
+    const plain = await harness.api.list({ projectId: 'workspace:wa', limit: 200 })
+    assert.equal(plain.total, 55, '旧参数继续保持严格项目筛选')
+    const first = await harness.api.list({ groupBy: 'project', query: '部署', limit: 50 })
+    const second = await harness.api.list({ groupBy: 'project', query: '部署', limit: 50, offset: 50 })
+    const third = await harness.api.list({ groupBy: 'project', query: '部署', limit: 50, offset: 100 })
+    assert.deepEqual(first.groups, [
+        { projectId: null, total: 1 }, { projectId: 'workspace:wa', total: 55 }, { projectId: 'workspace:wb', total: 55 },
+    ])
+    assert.equal(first.total, 111)
+    assert.ok(first.items.slice(1).every((record) => record.projectId === 'workspace:wa'))
+    assert.equal(second.items[0].projectId, 'workspace:wa')
+    assert.equal(new Set([...first.items, ...second.items, ...third.items].map((record) => record.id)).size, 111)
+    const selected = await harness.api.list({ projectId: 'workspace:wa', includeGlobal: true, groupBy: 'project', limit: 200 })
+    assert.deepEqual(selected.groups, [{ projectId: 'workspace:wa', total: 55 }, { projectId: null, total: 1 }])
+    assert.equal(selected.items.at(-1).id, 'smm_global')
+    assert.equal(selected.total, 56)
+    assert.ok(selected.items.every((record) => record.projectId !== 'workspace:wb'))
+    assert.equal((await harness.api.list({ projectId: null, includeGlobal: true })).total, 1)
+    assert.deepEqual((await harness.api.list({ query: '不存在', groupBy: 'project' })).groups, [])
+    await assert.rejects(harness.api.list({ includeGlobal: 'true' }), /bad-request/)
+    await assert.rejects(harness.api.list({ groupBy: 'tag' }), /bad-request/)
+})
 
 async function setState(harness, id, state, reason = '用户确认适用条件发生变化') {
     const input = { action: 'setState', id, state, reason, projectId: null }

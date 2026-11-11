@@ -14,6 +14,7 @@ async function createClient(host) {
     let pendingEffects = []
     const cleanups = []
     const registrations = []
+    const slotRegistrations = []
     const calls = []
     const downloads = []
     const revoked = []
@@ -49,8 +50,9 @@ async function createClient(host) {
             inject: (_key, callback) => callback(),
             register: (options, component) => {
                 if (options.name === 'plugins.bundle.config') {
-                    assert.equal(options.key, manifest.name, '配置槽必须使用安装包名')
+                    assert.ok([manifest.name, '@errorcode864/dsh-sleep-memory'].includes(options.key), '配置槽应匹配规范包名或已有安装别名')
                 }
+                slotRegistrations.push(options)
                 components.set(options.name, component)
                 return () => {}
             },
@@ -82,7 +84,7 @@ async function createClient(host) {
         setTimeout, clearTimeout, setInterval, clearInterval, console,
     })
     return {
-        components, registrations, calls, downloads, revoked,
+        components, registrations, slotRegistrations, calls, downloads, revoked,
         async render(component, props = {}, effects = false) {
             current = component
             cursor = 0
@@ -120,7 +122,10 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 3)
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 6)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展']) {
+            assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
+        }
         const project = inputs.find((node) => node.props.type === 'text')
         project.props.onChange({ target: { value: '项目甲' } })
         tree = await client.render(component, { view: 'page' })
@@ -129,6 +134,10 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         save.props.onClick()
         await flushTasks()
         assert.equal(override.projectId, '项目甲')
+        await host.api.setConfig({ changes: { autoLearnEnabled: false, recallReviewEnabled: false, semanticRecallEnabled: true } })
+        assert.equal(override.autoLearnEnabled, false)
+        assert.equal(override.recallReviewEnabled, false)
+        assert.equal(override.semanticRecallEnabled, true)
         assert.ok(client.registrations[0].descriptors.some((descriptor) => descriptor.method === 'status' && descriptor.parameters.length === 0))
         await assert.rejects(host.api.setConfig({ changes: { projectId: ' 甲 ' } }), /projectId/)
     } finally { client.dispose() }
@@ -271,9 +280,175 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
         assert.ok(flatten(row).some((node) => node.type === 'p' && node.children.includes(host.table.get('smm_a').content)))
         assert.ok(client.calls.some((call) => call.method === 'getRecord' && call.args[0].id === 'smm_a'))
         const runtime = flatten(tree).find((node) => node.type?.name === 'RuntimeStatus')
-        await client.render(runtime.type, {}, true)
-        const statusTree = await client.render(runtime.type)
+        const statusTree = await client.render(runtime.type, runtime.props)
         assert.equal(statusTree.props['aria-label'], '记忆运行状态')
         assert.ok(client.calls.some((call) => call.method === 'status'))
+    } finally { client.dispose() }
+})
+
+test('运行摘要覆盖加载、定时关闭、整理中、失败和读取失败，详情默认收起零计数', async () => {
+    const host = createHarness()
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const summary = flatten(page).find((node) => node.type?.name === 'RuntimeSummary')
+        const runtime = flatten(page).find((node) => node.type?.name === 'RuntimeStatus')
+        const state = await host.api.status()
+        const cases = [
+            { props: { state: null }, expected: '正在读取运行状态…' },
+            { props: { state: { ...state, nextSleepAt: null } }, expected: '定时整理未启用' },
+            { props: { state: { ...state, nextSleepAt: Date.now() } }, expected: '下次整理' },
+            { props: { state, sleeping: true }, expected: '正在整理记忆' },
+            { props: { state: { ...state, lastSleepError: { message: '模型不可用' } } }, expected: '上次整理失败', error: true },
+            { props: { state: { ...state, schedule: { ...state.schedule, lastError: '调度中断' } } }, expected: '上次整理失败', error: true },
+            { props: { state, error: '服务不可用' }, expected: '状态读取失败', error: true },
+        ]
+        for (const entry of cases) {
+            const tree = await client.render(summary.type, entry.props)
+            assert.ok(flatten(tree).some((node) => node.children.some((text) => typeof text === 'string' && text.includes(entry.expected))))
+            assert.equal(tree.props.className.includes('is-error'), entry.error ?? false)
+            assert.equal(flatten(tree).some((node) => node.type === 'details'), false)
+        }
+        const tree = await client.render(runtime.type, { state })
+        const counts = flatten(tree).find((node) => node.type === 'details')
+        assert.equal(counts.props.open, undefined, '诊断计数初始应保持折叠')
+        assert.ok(flatten(tree).some((node) => node.children.includes('本次加载暂无运行记录。')))
+        assert.ok(flatten(tree).some((node) => node.type === 'dd' && node.children.includes('全局')))
+    } finally { client.dispose() }
+})
+
+test('管理弹窗由摘要和标题打开，分类切换与关闭保持列表筛选及表单挂载', async () => {
+    const client = await createClient(createHarness())
+    try {
+        const main = client.components.get('main')
+        let page = await client.render(main)
+        const dialogNode = () => flatten(page).find((node) => node.type?.name === 'MemoryDialog' && node.props.id === 'sm-manager')
+        const visiblePanel = () => flatten(page).find((node) => node.props.id?.startsWith('sm-manager-') && !node.props.hidden)
+        assert.equal(dialogNode().props.open, false)
+        flatten(page).find((node) => node.type?.name === 'ProjectPicker').props.onChange({ projectId: '项目甲', globalOnly: false })
+        flatten(page).find((node) => node.children.includes('管理')).props.onClick()
+        page = await client.render(main)
+        assert.equal(dialogNode().props.open, true)
+        assert.equal(visiblePanel().props.id, 'sm-manager-status')
+        for (const [label, id] of [['会话范围', 'scope'], ['备份恢复', 'backup']]) {
+            flatten(page).find((node) => node.type === 'button' && node.children.includes(label)).props.onClick()
+            page = await client.render(main)
+            assert.equal(visiblePanel().props.id, `sm-manager-${id}`)
+            assert.ok(flatten(page).some((node) => node.type?.name === 'ScopePanel'))
+            assert.ok(flatten(page).some((node) => node.type?.name === 'BackupPanel'))
+        }
+        dialogNode().props.onClose()
+        page = await client.render(main)
+        assert.equal(dialogNode().props.open, false)
+        assert.equal(flatten(page).find((node) => node.type?.name === 'ProjectPicker').props.projectId, '项目甲')
+        flatten(page).find((node) => node.type?.name === 'RuntimeSummary').props.onOpen()
+        page = await client.render(main)
+        assert.equal(visiblePanel().props.id, 'sm-manager-status')
+    } finally { client.dispose() }
+})
+
+test('配置入口覆盖规范包名、旧安装别名，以及 bundle 和组件行详情', async () => {
+    const client = await createClient(createHarness())
+    try {
+        const keys = new Set(client.slotRegistrations.map((options) => `${options.name}:${options.key}`))
+        for (const name of ['dsh-sleep-memory', '@errorcode864/dsh-sleep-memory']) {
+            assert.ok(keys.has(`plugins.bundle.config:${name}`))
+            assert.ok(keys.has(`plugins.row.config:${name}#sleep-memory`))
+        }
+        assert.equal(client.slotRegistrations.filter((options) => options.name === 'main').length, 1)
+    } finally { client.dispose() }
+})
+
+test('原文入口为行内按钮，详情在独立弹窗展示且关闭后保留列表摘要', async () => {
+    const host = createHarness()
+    await host.table.put('smm_dialog', fixture('smm_dialog', {
+        source: { kind: 'user', confirmed: true, sessionId: '会话甲', messageId: '消息甲' },
+    }))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const rowNode = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        let row = await client.render(rowNode.type, rowNode.props)
+        const opener = flatten(row).find((node) => node.type === 'button' && node.children.includes('查看原文与来源'))
+        assert.ok(opener.props.className.includes('sm-record-open'))
+        assert.ok(row.children.some((node) => node?.props.className === 'sm-rowtop' && flatten(node).includes(opener)))
+        opener.props.onClick()
+        await flushTasks()
+        row = await client.render(rowNode.type, rowNode.props)
+        const dialog = flatten(row).find((node) => node.type?.name === 'MemoryDialog')
+        assert.equal(dialog.props.open, true)
+        assert.equal(dialog.props.title, '原文与来源')
+        assert.ok(flatten(dialog).some((node) => node.type === 'dd' && node.children.includes('会话甲')))
+        assert.ok(flatten(dialog).some((node) => node.type === 'dd' && node.children.includes('已确认')))
+        dialog.props.onClose()
+        row = await client.render(rowNode.type, rowNode.props)
+        assert.equal(flatten(row).find((node) => node.type?.name === 'MemoryDialog').props.open, false)
+        assert.ok(flatten(row).some((node) => node.props.className === 'sm-rowcontent' && node.children.includes(host.table.get('smm_dialog').content)))
+    } finally { client.dispose() }
+})
+
+test('项目选择器支持名称和标识搜索，选中项目包含全局而全局选项严格隔离', async () => {
+    const host = createHarness({}, { get: (key) => key === 'workspaceRegistry' ? {
+        list: () => [{ id: 'wa', title: '项目甲', sessionIds: ['sa'] }, { id: 'wb', title: '项目乙', sessionIds: ['sb'] }],
+    } : undefined })
+    await host.table.put('smm_a', fixture('smm_a', { projectId: 'workspace:wa' }))
+    await host.table.put('smm_b', fixture('smm_b', { projectId: 'workspace:wb' }))
+    await host.table.put('smm_global', fixture('smm_global'))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        let page = await client.render(main)
+        let pickerNode = flatten(page).find((node) => node.type?.name === 'ProjectPicker')
+        let picker = await client.render(pickerNode.type, pickerNode.props)
+        flatten(picker).find((node) => node.props['aria-label'] === '搜索项目').props.onChange({ target: { value: 'workspace:wa' } })
+        picker = await client.render(pickerNode.type, pickerNode.props)
+        assert.ok(flatten(picker).some((node) => node.children.includes('项目甲')))
+        assert.equal(flatten(picker).some((node) => node.children.includes('项目乙')), false)
+        flatten(picker).find((node) => node.type === 'button' && node.children.includes('项目甲')).props.onClick()
+        await client.render(main, {}, true)
+        page = await client.render(main)
+        const request = client.calls.filter((call) => call.method === 'list').at(-1).args[0]
+        assert.equal(request.projectId, 'workspace:wa')
+        assert.equal(request.includeGlobal, true)
+        assert.equal(request.groupBy, 'project')
+        const rows = flatten(page).filter((node) => node.type?.name === 'RecordRow')
+        assert.deepEqual(rows.map((node) => node.props.item.id), ['smm_a', 'smm_global'])
+        assert.equal(rows[0].props.projectTitle, '项目甲')
+        assert.ok(flatten(page).some((node) => node.type === 'summary' && node.children.includes('全局公共记忆')))
+        pickerNode = flatten(page).find((node) => node.type?.name === 'ProjectPicker')
+        picker = await client.render(pickerNode.type, pickerNode.props)
+        flatten(picker).find((node) => node.type === 'button' && node.children.includes('全局记忆')).props.onClick()
+        await client.render(main, {}, true)
+        page = await client.render(main)
+        assert.deepEqual(flatten(page).filter((node) => node.type?.name === 'RecordRow').map((node) => node.props.item.id), ['smm_global'])
+        assert.equal(client.calls.filter((call) => call.method === 'list').at(-1).args[0].projectId, null)
+    } finally { client.dispose() }
+})
+
+test('列表标签合并去重并截断，完整标签和指标仅在原文详情显示', async () => {
+    const host = createHarness()
+    await host.table.put('smm_labels', fixture('smm_labels', {
+        tags: ['项目', 'API', '部署'], keywords: ['项目', 'api', '数据库', '回归', '预算'],
+    }))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const rowNode = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        let row = await client.render(rowNode.type, rowNode.props)
+        assert.deepEqual(flatten(row).filter((node) => node.props.className === 'sm-tag').map((node) => node.children[0]),
+            ['项目', 'API', '部署', '数据库'])
+        assert.equal(flatten(row).some((node) => node.type?.name === 'MiniBar'), false)
+        flatten(row).find((node) => node.props['aria-label'] === '查看全部 6 个标签').props.onClick()
+        await flushTasks()
+        row = await client.render(rowNode.type, rowNode.props)
+        const dialog = flatten(row).find((node) => node.type?.name === 'MemoryDialog')
+        assert.equal(dialog.props.open, true)
+        assert.equal(flatten(dialog).filter((node) => node.props.className === 'sm-tag').length, 6)
+        assert.equal(flatten(dialog).filter((node) => node.type?.name === 'MiniBar').length, 2)
     } finally { client.dispose() }
 })

@@ -54,7 +54,8 @@ export function getSessionId(context) {
 }
 
 export function listWorkspaceScopes(ctx) {
-    const registry = ctx.workspaceRegistry ?? ctx.get?.('workspaceRegistry')
+    // 工作区是可选服务；直接属性访问会被 Cordis 的注入检查拒绝。
+    const registry = ctx.get?.('workspaceRegistry')
     if (!registry || typeof registry.list !== 'function') return []
     return registry.list().filter((workspace) => isSessionId(workspace.id) && workspace.id.length <= 190).map((workspace) => ({
         workspaceId: workspace.id,

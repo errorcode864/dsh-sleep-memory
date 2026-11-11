@@ -30,6 +30,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const PACKAGE_ID = 'dsh-sleep-memory';
+    // 旧 profile 使用作用域依赖别名，宿主配置槽按安装时的依赖键匹配。
+    const CONFIG_PACKAGE_IDS = [PACKAGE_ID, '@errorcode864/dsh-sleep-memory'];
     const SLOT_ID = 'sleep-memory';
     const NS = 'sleep-memory';
 
@@ -63,7 +65,7 @@ window.__ModuleLoader__.load({
       'sleep-memory.panel': '记忆银行',
       'sleep-memory.page.title': '记忆银行',
 
-      'sleep-memory.stats.title': '库概况',
+      'sleep-memory.stats.title': '全库概览',
       'sleep-memory.stats.total': '{n} 条活记录',
       'sleep-memory.stats.superseded': '{n} 条未参与自动召回',
       'sleep-memory.stats.edges': '{n} 条联想边',
@@ -248,7 +250,7 @@ window.__ModuleLoader__.load({
 .sm-page { height: 100%; min-height: 0; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 24px 32px 40px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 22px; }
 .sm-page *, .sm-page *::before, .sm-page *::after { box-sizing: border-box; }
 .sm-inner { width: 100%; max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
-.sm-head { display: flex; flex-direction: column; gap: 2px; padding-bottom: 4px; }
+.sm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 4px; }
 .sm-title { margin: 0; font-size: 21px; line-height: 30px; font-weight: 700; }
 
 .sm-card { display: flex; flex-direction: column; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-lg); overflow: hidden; }
@@ -294,7 +296,7 @@ window.__ModuleLoader__.load({
 .sm-tab[aria-selected="true"] { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-weight: 600; }
 .sm-tab:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); outline-offset: -1px; }
 
-.sm-rows { display: flex; flex-direction: column; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); overflow: hidden; }
+.sm-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); overflow: hidden; }
 .sm-row { display: flex; flex-direction: column; gap: 5px; padding: 10px 14px; }
 .sm-row + .sm-row { border-top: 1px solid var(--dsw-alias-border-l1); }
 .sm-rowhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -359,8 +361,74 @@ window.__ModuleLoader__.load({
 .sm-management .sm-btn { margin: 4px 8px 4px 0; }
 .sm-management p { margin: 10px 0; }
 .sm-management [role="status"] { padding: 10px; margin-top: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm); }
-.sm-project-filter { flex: 1 1 200px; min-width: 140px; width: auto; }
-.sm-status p { margin: 2px 0; }
+.sm-project-picker { position: relative; flex: 0 1 220px; min-width: 160px; }
+.sm-project-picker > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; width: 100%; }
+.sm-project-picker > summary::-webkit-details-marker { display: none; }
+.sm-project-picker > summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-project-menu { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); padding: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-shadow-lv2); }
+.sm-project-options { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; margin-top: 8px; }
+.sm-project-option { width: 100%; height: auto; min-height: 32px; justify-content: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.sm-project-option[aria-pressed="true"] { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.sm-project-message { margin: 8px 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-group-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-group-toggle input { margin: 0; accent-color: var(--dsw-alias-brand-primary); }
+.sm-project-group { border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.sm-project-group + .sm-project-group { margin-top: 12px; }
+.sm-project-group > summary { padding: 10px 14px; font-size: 13px; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.sm-project-group > summary .sm-count { margin-left: 8px; font-weight: 400; }
+.sm-project-group .sm-rows { border: 0; border-top: 1px solid var(--dsw-alias-border-l1); border-radius: 0; }
+.sm-tag-more { height: 20px; padding: 0 5px; font-size: 11px; }
+.sm-stats-scope { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.sm-btn-quiet { border-color: transparent; background: transparent; color: var(--dsw-alias-label-secondary); }
+.sm-runtime-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; min-height: 32px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.sm-runtime-state { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.sm-runtime-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.sm-runtime-summary.is-working .sm-runtime-state { color: var(--dsw-alias-brand-primary); }
+.sm-runtime-summary.is-error { padding: 4px 10px; border-radius: var(--dsw-radius-sm); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, var(--dsw-alias-bg-layer-1)); }
+.sm-runtime-summary.is-error .sm-runtime-state { color: var(--dsw-alias-state-error-primary); }
+.sm-dialog { position: fixed; inset: 0; width: min(760px, calc(100vw - 48px)); max-width: none; height: min(640px, calc(100dvh - 64px)); max-height: calc(100dvh - 64px); margin: auto; padding: 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; box-shadow: var(--dsw-shadow-lv2); overflow: hidden; }
+.sm-dialog[open] { display: flex; flex-direction: column; }
+.sm-dialog::backdrop { background: color-mix(in srgb, var(--dsw-alias-label-primary) 20%, transparent); }
+.sm-dialog-head { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.sm-dialog-title { margin: 0; font-size: 17px; line-height: 24px; font-weight: 600; }
+.sm-dialog-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px 24px 24px; overflow-wrap: anywhere; }
+.sm-manager-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; margin-bottom: 18px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.sm-manager-tabs .sm-btn[aria-pressed="true"] { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.sm-manager-section { padding: 0; }
+.sm-manager-section h3 { margin: 0 0 12px; font-size: 14px; line-height: 22px; font-weight: 600; }
+.sm-manager-section p { margin: 10px 0; }
+.sm-runtime-info { display: flex; flex-direction: column; gap: 14px; margin: 0; }
+.sm-runtime-info > div { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; }
+.sm-runtime-info dt { flex: none; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.sm-runtime-info dd { margin: 0; min-width: 0; text-align: right; overflow-wrap: anywhere; font-size: 13px; }
+.sm-runtime-counts { border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 20px; padding-top: 16px; }
+.sm-runtime-counts summary { cursor: pointer; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-runtime-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.sm-runtime-error { color: var(--dsw-alias-state-error-primary); font-size: 12px; }
+.sm-runtime-counters { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 20px; }
+.sm-runtime-counters th, .sm-runtime-counters td { text-align: left; vertical-align: top; padding: 10px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.sm-runtime-counters th { width: 76px; font-weight: 400; color: var(--dsw-alias-label-secondary); }
+.sm-rowtop { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+.sm-rowtop .sm-rowmeta { min-width: 0; overflow-wrap: anywhere; }
+.sm-record-open { flex: none; margin-left: auto; height: 26px; padding: 0 6px; font-size: 12px; }
+.sm-record-section + .sm-record-section { border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 20px; padding-top: 18px; }
+.sm-record-section h3 { font-size: 14px; line-height: 22px; font-weight: 600; margin: 0 0 12px; }
+.sm-record-section p { margin: 8px 0; }
+.sm-record-original { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 24px; }
+.sm-record-provenance { margin-top: 18px; }
+.sm-record-history { margin-top: 12px; padding: 12px 0; }
+.sm-record-history + .sm-record-history { border-top: 1px solid var(--dsw-alias-border-l1); }
+.sm-record-pagination { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.sm-dialog .sm-management { padding: 0; }
+.sm-dialog .sm-card.sm-management { padding: 12px 14px; }
+.sm-dialog input[type="file"] { max-width: 100%; }
+@media (max-width: 480px) {
+  .sm-page { padding: 20px 16px 32px; }
+  .sm-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 32px); }
+  .sm-dialog-head { padding: 14px 16px; }
+  .sm-dialog-body { padding: 16px; }
+  .sm-tabs { flex-wrap: wrap; }
+}
 
 @media (prefers-reduced-motion: no-preference) {
   .sm-btn, .sm-tab { transition-duration: var(--ds-transition-duration-fast, 0.12s); }
@@ -618,8 +686,71 @@ window.__ModuleLoader__.load({
             h('span', { className: 'sm-rowmeta' }, Math.round(clamp01(value) * 100)));
         }
 
-        /** One live memory record: badges + content + tags + metric bars. */
-        function RecordRow({ item, onChanged }) {
+        /** 标签优先展示，关键词补充；大小写和空白差异不重复占用列表空间。 */
+        function collectRecordLabels(item) {
+          const seen = new Set();
+          return [...(item.tags ?? []), ...(item.keywords ?? [])].map((label) => String(label).trim()).filter((label) => {
+            const key = label.toLowerCase();
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+
+        /** 项目由全库记录提供，工作区名称仅作展示，不推断或修改历史归属。 */
+        function ProjectPicker({ projects, projectId, globalOnly, onChange }) {
+          const [search, setSearch] = useState('');
+          const pickerRef = useRef(null);
+          const searchRef = useRef(null);
+          const selected = globalOnly ? '全局记忆' : projectId
+            ? projects.find((project) => project.projectId === projectId)?.title ?? projectId : '全部项目';
+          useEffect(() => {
+            const dismiss = (event) => {
+              if (pickerRef.current?.open && !pickerRef.current.contains(event.target)) pickerRef.current.open = false;
+            };
+            document.addEventListener('pointerdown', dismiss);
+            return () => document.removeEventListener('pointerdown', dismiss);
+          }, []);
+          const choose = (nextProjectId, nextGlobalOnly) => {
+            onChange({ projectId: nextProjectId, globalOnly: nextGlobalOnly });
+            setSearch('');
+            if (pickerRef.current) {
+              pickerRef.current.open = false;
+              pickerRef.current.querySelector('summary').focus();
+            }
+          };
+          const text = search.trim().toLowerCase();
+          const matches = projects.filter((project) => project.projectId !== null
+            && [project.title, project.projectId].some((value) => value.toLowerCase().includes(text)));
+          return h('details', {
+            className: 'sm-project-picker', ref: pickerRef,
+            onToggle: (event) => { if (event.currentTarget.open) searchRef.current?.focus(); },
+            onKeyDown: (event) => {
+              if (event.key !== 'Escape') return;
+              event.stopPropagation();
+              if (pickerRef.current) { pickerRef.current.open = false; pickerRef.current.querySelector('summary').focus(); }
+            },
+          },
+          h('summary', { className: 'sm-btn sm-btn-outline', 'aria-label': '项目筛选', title: selected },
+            h('span', null, selected), h('span', { 'aria-hidden': true }, '⌄')),
+          h('div', { className: 'sm-project-menu' },
+            h('input', { ref: searchRef, className: 'sm-search', type: 'search', value: search,
+              'aria-label': '搜索项目', placeholder: '搜索项目名称或标识', onChange: (event) => setSearch(event.target.value) }),
+            h('div', { className: 'sm-project-options', role: 'group', 'aria-label': '项目范围' },
+              h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-project-option',
+                'aria-pressed': !projectId && !globalOnly, onClick: () => choose('', false) }, '全部项目'),
+              h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-project-option',
+                'aria-pressed': globalOnly, onClick: () => choose('', true) }, '全局记忆'),
+              ...matches.map((project) => h('button', { key: project.projectId, type: 'button',
+                className: 'sm-btn sm-btn-quiet sm-project-option', title: project.projectId,
+                'aria-pressed': !globalOnly && projectId === project.projectId,
+                onClick: () => choose(project.projectId, false) }, project.title))),
+            matches.length === 0 ? h('p', { className: 'sm-project-message' }, text ? '没有匹配的项目' : '暂无项目专属记忆') : null));
+        }
+
+        /** 列表只保留摘要，原文、来源与纠正管理在统一弹窗中查看。 */
+        function RecordRow({ item, onChanged, projectTitle, hideProject = false }) {
+          const [detailOpen, setDetailOpen] = useState(false);
           const [detail, setDetail] = useState(null);
           const [detailBusy, setDetailBusy] = useState(false);
           const [detailError, setDetailError] = useState('');
@@ -637,6 +768,7 @@ window.__ModuleLoader__.load({
             }
           };
           const kindLabel = item.kind === 'fact' ? t('sleep-memory.kind.fact') : t('sleep-memory.kind.experience');
+          const labels = collectRecordLabels(item);
           const salient = item.layer === 'salient' && Number.isFinite(Number(item.valence));
           const meta = [
             relTime(item.lastAccessAt) || relTime(item.createdAt),
@@ -645,27 +777,13 @@ window.__ModuleLoader__.load({
               ? t('sleep-memory.row.edgeCount', { n: item.edges.length }) : null,
           ].filter(Boolean).join(' · ');
           return h('li', { className: 'sm-row', key: item.id },
-            h('div', { className: 'sm-rowmeta' }, `范围：${item.projectId ?? '全局'} · 来源：${item.source?.kind ?? '未注明'} · ${STATE_LABELS[item.lifecycle?.state ?? 'active']}`),
-            h('button', {
-              type: 'button', className: 'sm-btn sm-btn-outline', disabled: detailBusy,
-              onClick: () => detail ? setDetail(null) : void loadDetail(),
-            }, detailBusy ? '正在读取原文…' : detail ? '收起原文' : '查看原文与来源'),
-            detailError ? h('div', { role: 'alert' }, `读取失败：${detailError}`) : null,
-            detail ? h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
-              h('p', null, `记忆 ID：${detail.record.id} · ${detail.current ? '当前有效' : '未参与自动召回'}`),
-              h('p', null, detail.record.content),
-              h('p', null, `有效性：${STATE_LABELS[detail.lifecycle.state]}${detail.lifecycle.reason ? ` · ${detail.lifecycle.reason}` : ''}`),
-              detail.replacedBy ? h('p', null, `替代记忆：${detail.replacedBy}`) : null,
-              h('p', null, `纠正链：${detail.totalChain} 条`),
-              ...detail.chain.map((record) => h('div', { key: record.id },
-                h('code', null, record.id), h('p', null, record.content))),
-              h(RecordEditor, { detail, onChanged: () => { void loadDetail(); onChanged?.(); } }),
-              h('p', null, `来源记录：${detail.totalSources} 条`),
-              ...detail.sources.map((source) => h('div', { key: source.id },
-                h('strong', null, source.id), h('p', null, source.content))),
-              detail.offset > 0 ? h('button', { type: 'button', disabled: detailBusy, onClick: () => void loadDetail(Math.max(0, detail.offset - 5)) }, '上一页来源') : null,
-              detail.offset + detail.limit < Math.max(detail.totalSources, detail.totalChain)
-                ? h('button', { type: 'button', disabled: detailBusy, onClick: () => void loadDetail(detail.offset + detail.limit) }, '下一页来源') : null) : null,
+            h('div', { className: 'sm-rowtop' },
+              h('span', { className: 'sm-rowmeta' },
+                `${hideProject ? '' : `范围：${projectTitle ?? item.projectId ?? '全局'} · `}${STATE_LABELS[item.lifecycle?.state ?? 'active']}`),
+              h('button', {
+                type: 'button', className: 'sm-btn sm-btn-quiet sm-record-open', disabled: detailBusy,
+                onClick: () => { setDetailOpen(true); void loadDetail(); },
+              }, '查看原文与来源')),
             h('div', { className: 'sm-rowhead' },
               h(LayerBadge, { layer: item.layer }),
               h('span', { className: 'sm-badge' }, kindLabel),
@@ -676,18 +794,60 @@ window.__ModuleLoader__.load({
               h('span', { className: 'sm-spring' }),
               h('span', { className: 'sm-rowmeta' }, meta)),
             h('div', { className: 'sm-rowcontent', title: item.content }, item.content),
-            (Array.isArray(item.tags) && item.tags.length > 0) || (Array.isArray(item.keywords) && item.keywords.length > 0)
+            labels.length > 0
               ? h('div', { className: 'sm-rowtags' },
-                (item.tags ?? []).map((tag) => h('span', { className: 'sm-tag', key: `t:${tag}` }, tag)),
-                (item.keywords ?? []).map((kw) => h('span', { className: 'sm-tag', key: `k:${kw}` }, kw)))
+                labels.slice(0, 4).map((label) => h('span', { className: 'sm-tag', key: label }, label)),
+                labels.length > 4 ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet sm-tag-more',
+                  'aria-label': `查看全部 ${labels.length} 个标签`, onClick: () => { setDetailOpen(true); void loadDetail(); } }, `+${labels.length - 4}`) : null)
               : null,
-            h('div', { className: 'sm-bars' },
-              h(MiniBar, { label: t('sleep-memory.row.importance'), value: item.importance }),
-              h(MiniBar, { label: t('sleep-memory.row.strength'), value: item.strength })));
+            h(MemoryDialog, { id: `sm-record-${item.id}`, title: '原文与来源', open: detailOpen, onClose: () => setDetailOpen(false) },
+              detailBusy ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取原文…') : null,
+              detailError ? h('div', { className: 'sm-runtime-error', role: 'alert' },
+                h('p', null, `读取失败：${detailError}`),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: detailBusy, onClick: () => void loadDetail() }, '重新读取')) : null,
+              detail ? h(React.Fragment, null,
+                h('section', { className: 'sm-record-section', 'aria-label': '记忆原文' },
+                  h('h3', null, '记忆原文'),
+                  h('p', { className: 'sm-record-original' }, detail.record.content),
+                  h('div', { className: 'sm-bars' },
+                    h(MiniBar, { label: t('sleep-memory.row.importance'), value: detail.record.importance }),
+                    h(MiniBar, { label: t('sleep-memory.row.strength'), value: detail.record.strength })),
+                  labels.length ? h('div', { className: 'sm-rowtags', 'aria-label': '全部标签与关键词' },
+                    collectRecordLabels(detail.record).map((label) => h('span', { className: 'sm-tag', key: label }, label))) : null,
+                  h('dl', { className: 'sm-runtime-info sm-record-provenance' },
+                    h('div', null, h('dt', null, '记忆 ID'), h('dd', null, detail.record.id)),
+                    h('div', null, h('dt', null, '范围'), h('dd', null, detail.record.projectId ?? '全局')),
+                    h('div', null, h('dt', null, '有效性'), h('dd', null, `${STATE_LABELS[detail.lifecycle.state]}${detail.lifecycle.reason ? ` · ${detail.lifecycle.reason}` : ''}`)),
+                    h('div', null, h('dt', null, '自动召回'), h('dd', null, detail.current ? '参与' : '未参与'))),
+                  detail.replacedBy ? h('p', { className: 'sm-runtime-note' }, `替代记忆：${detail.replacedBy}`) : null),
+                h('section', { className: 'sm-record-section', 'aria-label': '来源信息' },
+                  h('h3', null, '来源信息'),
+                  h('dl', { className: 'sm-runtime-info' },
+                    h('div', null, h('dt', null, '来源类型'), h('dd', null, SOURCE_LABELS[detail.record.source?.kind] ?? detail.record.source?.kind ?? '未记录')),
+                    h('div', null, h('dt', null, '用户确认'), h('dd', null,
+                      detail.record.source?.confirmed === true ? '已确认' : detail.record.source?.confirmed === false ? '未确认' : '未记录')),
+                    detail.record.source?.sessionId ? h('div', null, h('dt', null, '来源会话'), h('dd', null, detail.record.source.sessionId)) : null,
+                    detail.record.source?.messageId ? h('div', null, h('dt', null, '来源消息'), h('dd', null, detail.record.source.messageId)) : null)),
+                h('section', { className: 'sm-record-section', 'aria-label': '纠正记录与管理' },
+                  detail.totalChain > 1 ? h('details', null,
+                    h('summary', null, `纠正链 · ${detail.totalChain} 条`),
+                    ...detail.chain.map((record) => h('div', { className: 'sm-record-history', key: record.id },
+                      h('code', null, record.id), h('p', { className: 'sm-record-original' }, record.content)))) : null,
+                  h(RecordEditor, { detail, onChanged: () => { void loadDetail(); onChanged?.(); } })),
+                h('section', { className: 'sm-record-section', 'aria-label': '来源记录' },
+                  h('h3', null, `来源记录 · ${detail.totalSources} 条`),
+                  detail.totalSources === 0 ? h('p', { className: 'sm-runtime-note' }, '没有关联来源记录。') : null,
+                  ...detail.sources.map((source) => h('div', { className: 'sm-record-history', key: source.id },
+                    h('code', null, source.id), h('p', { className: 'sm-record-original' }, source.content)))),
+                h('div', { className: 'sm-record-pagination' },
+                  detail.offset > 0 ? h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: detailBusy, onClick: () => void loadDetail(Math.max(0, detail.offset - 5)) }, '上一页来源') : null,
+                  detail.offset + detail.limit < Math.max(detail.totalSources, detail.totalChain)
+                    ? h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: detailBusy, onClick: () => void loadDetail(detail.offset + detail.limit) }, '下一页来源') : null)) : null));
         }
 
         const STATE_LABELS = { active: '有效', review: '待复核', invalid: '已失效' };
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
+        const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
 
         /** 纠正前展示新旧正文，状态变更必须先取得服务端影响计划。 */
@@ -781,8 +941,8 @@ window.__ModuleLoader__.load({
                 } catch (cause) { setError(cause.message); }
                 finally { setBusy(false); }
             };
-            return h('details', { className: 'sm-card sm-management' },
-                h('summary', null, '会话与项目范围'),
+            return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '会话与项目范围' },
+                h('h3', null, '会话与项目范围'),
                 h('p', null, '选择会话查看自动范围；绑定仅影响今后的写入与检索，不迁移已有记忆。'),
                 h('label', null, '会话 ID', h('input', {
                     className: 'sm-search', list: 'sm-session-options', value: sessionId, disabled: busy,
@@ -842,8 +1002,8 @@ window.__ModuleLoader__.load({
                     setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
                 } finally { setBusy(false); }
             };
-            return h('details', { className: 'sm-card sm-management' },
-                h('summary', null, '备份与恢复'),
+            return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '备份与恢复' },
+                h('h3', null, '备份与恢复'),
                 h('p', null, '备份包含全库历史与来源。导入先预演；同 ID 异内容会拒绝，发生 I/O 中断可用原文件重试。'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
                 h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
@@ -880,7 +1040,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sm-statrow' },
               h('div', { className: 'sm-layers' },
                 LAYERS.map((layer) => h('span', { className: 'sm-badge is-layer', key: layer },
-                  `${t(`sleep-memory.layer.${layer}`)} ${stats?.byLayer?.[layer] ?? 0}`)))));
+                  `${t(`sleep-memory.layer.${layer}`)} ${stats?.byLayer?.[layer] ?? 0}`))),
+              h('span', { className: 'sm-stats-scope' }, t('sleep-memory.stats.title'))));
         }
 
         /** Salient valence×arousal scatter: ✦ positive and ⚠️ negative coloring. */
@@ -972,7 +1133,8 @@ window.__ModuleLoader__.load({
 
         // ---- memory bank page ----------------------------------------------
 
-        function RuntimeStatus() {
+        /** 摘要与详情共享轮询，手动整理结束后立即刷新，避免侧栏内重复请求。 */
+        function useRuntimeStatus(sleeping) {
           const [state, setState] = useState(null);
           const [error, setError] = useState('');
           useEffect(() => {
@@ -988,21 +1150,92 @@ window.__ModuleLoader__.load({
             void refresh();
             const timer = setInterval(refresh, 10000);
             return () => { active = false; clearInterval(timer); };
-          }, []);
-          const formatTime = (value) => value ? new Date(value).toLocaleString() : '暂无';
-          return h('section', { className: 'sm-card sm-row sm-status', 'aria-label': '记忆运行状态' },
-            h('strong', null, '运行状态'),
-            error ? h('p', { role: 'alert' }, `状态读取失败：${error}`) : null,
+          }, [sleeping]);
+          return { state, error };
+        }
+
+        /** 摘要带日期以区分跨日调度，详情保留完整本地时间。 */
+        function formatRuntimeTime(value, compact = false) {
+          if (!value) return '暂无记录';
+          return new Date(value).toLocaleString('zh-CN', compact
+            ? { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+            : undefined);
+        }
+
+        function RuntimeSummary({ state, error, sleeping, onOpen }) {
+          const working = sleeping || state?.sleeping;
+          const failed = Boolean(error || (!working && (state?.schedule?.lastError || state?.lastSleepError)));
+          const label = error ? '状态读取失败，请查看详情'
+            : working ? '正在整理记忆…'
+              : failed ? '上次整理失败，请查看详情'
+                : !state ? '正在读取运行状态…'
+                  : state.nextSleepAt ? `空闲 · 下次整理 ${formatRuntimeTime(state.nextSleepAt, true)}`
+                    : '空闲 · 定时整理未启用';
+          return h('div', { className: `sm-runtime-summary${failed ? ' is-error' : working ? ' is-working' : ''}`, 'aria-label': '记忆运行摘要' },
+            h('span', { className: 'sm-runtime-state', role: failed ? 'alert' : 'status' },
+              h('span', { className: 'sm-runtime-dot', 'aria-hidden': true }), label),
+            h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', onClick: onOpen }, failed ? '查看原因' : '运行详情'));
+        }
+
+        /** 运行详情区分持久调度与本次加载计数，零计数默认收起。 */
+        function RuntimeStatus({ state, error, sleeping }) {
+          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review]
+            .some((counters) => Object.values(counters ?? {}).some((value) => value > 0));
+          const infoRow = (label, value) => h('div', { key: label }, h('dt', null, label), h('dd', null, value));
+          const counterRow = (label, value) => h('tr', { key: label }, h('th', { scope: 'row' }, label), h('td', null, value));
+          return h('section', { className: 'sm-manager-section', 'aria-label': '记忆运行状态' },
+            error ? h('p', { className: 'sm-runtime-error', role: 'alert' }, `状态读取失败：${error}`) : null,
             state ? h(React.Fragment, null,
-              h('p', null, `配置回退范围：${state.projectId ?? '全局'} · ${state.sleeping ? '正在睡眠整理' : '空闲'}`),
-              h('p', null, `上次成功睡眠（持久）：${formatTime(state.schedule?.lastSuccessAt)} · 下次定时：${state.nextSleepAt ? formatTime(state.nextSleepAt) : '未启用'}`),
-              h('p', null, '以下计数仅统计本次加载：'),
-              h('p', null, `情绪评分：已尝试 ${state.scoring.attempted} 次，写入 ${state.scoring.stored} 条，跳过 ${state.scoring.skipped} 次，失败 ${state.scoring.failed} 次`),
-              h('p', null, `查询扩展：成功 ${state.expansion.succeeded} 次，失败或不可用 ${state.expansion.failed} 次`),
-              h('p', null, `自动注入：${state.injection?.injected ?? 0} 条 · 重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次 · 预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
-              state.schedule?.lastError ? h('p', { role: 'alert' }, `持久调度状态：${state.schedule.lastError} · 连续失败 ${state.schedule.failures} 次`) : null,
-              state.lastSleepError ? h('p', { role: 'alert' }, `最近睡眠失败：${state.lastSleepError.message}`) : null)
-              : h('p', null, '正在读取运行状态…'));
+              h('dl', { className: 'sm-runtime-info' },
+                infoRow('运行状态', sleeping || state.sleeping ? '正在整理记忆' : '空闲'),
+                infoRow('配置回退范围', state.projectId ?? '全局'),
+                infoRow('上次成功整理', formatRuntimeTime(state.schedule?.lastSuccessAt)),
+                infoRow('下次定时整理', state.nextSleepAt ? formatRuntimeTime(state.nextSleepAt) : '未启用')),
+              state.schedule?.lastError ? h('p', { className: 'sm-runtime-error', role: 'alert' },
+                `调度失败：${state.schedule.lastError} · 连续失败 ${state.schedule.failures} 次`) : null,
+              state.lastSleepError ? h('p', { className: 'sm-runtime-error', role: 'alert' }, `最近整理失败：${state.lastSleepError.message}`) : null,
+              h('div', { className: 'sm-runtime-counts' },
+                h('h3', null, '本次加载'),
+                h('p', { className: 'sm-runtime-note' }, hasActivity ? '以下计数仅统计本次加载。' : '本次加载暂无运行记录。'),
+                h('p', { className: 'sm-runtime-note' }, '计数在插件重新加载后重置，上次成功整理时间单独持久保存。'),
+                h('details', null,
+                  h('summary', null, '诊断计数'),
+                  h('table', { className: 'sm-runtime-counters', 'aria-label': '本次加载诊断计数' },
+                    h('tbody', null,
+                      counterRow('情绪评分', `已尝试 ${state.scoring?.attempted ?? 0} 次，写入 ${state.scoring?.stored ?? 0} 条，跳过 ${state.scoring?.skipped ?? 0} 次，失败 ${state.scoring?.failed ?? 0} 次`),
+                      counterRow('自主学习', `写入 ${state.learning?.stored ?? 0} 条，重复 ${state.learning?.duplicates ?? 0} 条，待复核 ${state.learning?.reviewRequired ?? 0} 条，失败 ${state.learning?.failed ?? 0} 次；${state.learning?.lastReason ?? '尚未运行'}`),
+                      counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
+                      counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
+                      counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`))))))
+              : !error ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取运行状态…') : null);
+        }
+
+        /** 管理与原文共用居中弹窗，浏览器负责焦点约束与关闭后的焦点恢复。 */
+        function MemoryDialog({ id, title, open, onClose, children }) {
+          const dialogRef = useRef(null);
+          useEffect(() => {
+            const dialog = dialogRef.current;
+            if (open && !dialog.open) dialog.showModal();
+            else if (!open && dialog.open) dialog.close();
+          }, [open]);
+          useEffect(() => {
+            const dialog = dialogRef.current;
+            return () => { if (dialog.open) dialog.close(); };
+          }, []);
+          return h('dialog', {
+            ref: dialogRef, id, className: 'sm-dialog', 'aria-labelledby': `${id}-title`, onClose,
+            onCancel: (event) => { event.preventDefault(); onClose(); },
+            onClick: (event) => {
+              if (event.target !== event.currentTarget) return;
+              const bounds = event.currentTarget.getBoundingClientRect();
+              // 只响应弹窗外的遮罩点击，保留表单内部留白的点击行为。
+              if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onClose();
+            },
+          },
+          h('div', { className: 'sm-dialog-head' },
+            h('h2', { id: `${id}-title`, className: 'sm-dialog-title' }, title),
+            h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', onClick: onClose, autoFocus: true, 'aria-label': `关闭${title}` }, '关闭')),
+          h('div', { className: 'sm-dialog-body' }, children));
         }
 
         function MemoryBankPage() {
@@ -1010,12 +1243,15 @@ window.__ModuleLoader__.load({
           const toast = useToast();
           const [stats, reloadStats] = useStats();
           const [view, setView] = useState('browse');
+          const [managementView, setManagementView] = useState(null);
 
           // Browse state: layer filter, debounced query, one accumulating page.
           const [layer, setLayer] = useState('all');
           const [validity, setValidity] = useState('active');
           const [projectFilter, setProjectFilter] = useState('');
           const [globalOnly, setGlobalOnly] = useState(false);
+          const [grouped, setGrouped] = useState(false);
+          const [groups, setGroups] = useState([]);
           const [queryInput, setQueryInput] = useState('');
           const [query, setQuery] = useState('');
           const [items, setItems] = useState(null);
@@ -1032,6 +1268,12 @@ window.__ModuleLoader__.load({
           const [sleeping, setSleeping] = useState(false);
           const [previewing, setPreviewing] = useState(false);
           const [report, setReport] = useState(null);
+          const runtime = useRuntimeStatus(sleeping);
+          const groupResults = grouped || Boolean(projectFilter && !globalOnly);
+          const projects = stats?.projects ?? [];
+          const projectName = (projectId) => projectId === null
+            ? (projectFilter && !globalOnly ? '全局公共记忆' : '全局记忆')
+            : projects.find((project) => project.projectId === projectId)?.title ?? projectId;
 
           useEffect(() => {
             if (queryTimer.current) clearTimeout(queryTimer.current);
@@ -1049,23 +1291,27 @@ window.__ModuleLoader__.load({
                 limit: PAGE_SIZE,
                 offset: targetPage * PAGE_SIZE,
                 state: validity,
-                ...(globalOnly ? { projectId: null } : projectFilter.trim() ? { projectId: projectFilter.trim() } : {}),
+                ...(globalOnly ? { projectId: null } : projectFilter ? { projectId: projectFilter, includeGlobal: true } : {}),
+                ...(groupResults ? { groupBy: 'project' } : {}),
               });
               if (request !== listRequest.current) return;
               const next = Array.isArray(outcome?.items) ? outcome.items : [];
               setTotal(outcome?.total ?? 0);
+              setGroups(Array.isArray(outcome?.groups) ? outcome.groups : []);
               setItems((prev) => (append && Array.isArray(prev) ? [...prev, ...next] : next));
               setPage(targetPage);
             } catch (error) {
               if (request !== listRequest.current) return;
-              if (!append) setItems([]);
+              if (!append) { setItems([]); setTotal(0); setGroups([]); }
               showToast(`${t('sleep-memory.toast.failed')}：${error?.message ?? error}`, true);
             } finally {
               if (request === listRequest.current) setLoading(false);
             }
-          }, [layer, query, validity, projectFilter, globalOnly, t]);
+          }, [layer, query, validity, projectFilter, globalOnly, groupResults, t]);
 
           useEffect(() => {
+            setItems(null);
+            setGroups([]);
             void loadPage(0, false);
           }, [loadPage]);
 
@@ -1087,6 +1333,11 @@ window.__ModuleLoader__.load({
 
           const hasMore = items !== null && items.length < total;
           const filterActive = layer !== 'all' || query !== '' || validity !== 'active' || projectFilter !== '' || globalOnly;
+          const onRecordsChanged = () => { void loadPage(0, false); reloadStats(); reloadEdges(); };
+          const renderRows = (records, hideProject = false) => h('ul', { className: 'sm-rows' },
+            records.map((item) => h(RecordRow, {
+              item, key: item.id, projectTitle: projectName(item.projectId ?? null), hideProject, onChanged: onRecordsChanged,
+            })));
 
           let browseBody;
           if (items === null && loading) {
@@ -1100,10 +1351,23 @@ window.__ModuleLoader__.load({
               onAction: () => { setQueryInput(''); setQuery(''); setLayer('all'); setValidity('active'); setProjectFilter(''); setGlobalOnly(false); },
             });
           } else {
+            const loadedGroups = new Map();
+            for (const item of items ?? []) {
+              const projectId = item.projectId ?? null;
+              if (!loadedGroups.has(projectId)) loadedGroups.set(projectId, []);
+              loadedGroups.get(projectId).push(item);
+            }
+            const groupTotals = new Map(groups.map((group) => [group.projectId, group.total]));
             browseBody = h(React.Fragment, null,
-              h('ul', { className: 'sm-rows' }, (items ?? []).map((item) => h(RecordRow, {
-                item, key: item.id, onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); },
-              }))),
+              groupResults ? h('div', { 'aria-label': '按项目分组的记忆' },
+                [...loadedGroups].map(([projectId, records]) => h('details', {
+                  className: 'sm-project-group', key: JSON.stringify(projectId), open: true,
+                },
+                h('summary', null, projectName(projectId),
+                  h('span', { className: 'sm-count' }, `${groupTotals.get(projectId) ?? records.length} 条`),
+                  (groupTotals.get(projectId) ?? 0) > records.length
+                    ? h('span', { className: 'sm-count' }, `已加载 ${records.length} 条`) : null),
+                renderRows(records, true)))) : renderRows(items ?? []),
               hasMore ? h('div', { style: { display: 'flex', justifyContent: 'center', padding: '10px 0 0' } },
                 h('button', {
                   type: 'button', className: 'sm-btn sm-btn-outline',
@@ -1115,12 +1379,11 @@ window.__ModuleLoader__.load({
           return h('div', { className: 'sm-page' },
             h('div', { className: 'sm-inner' },
               h('div', { className: 'sm-head' },
-                h('h1', { className: 'sm-title' }, t('sleep-memory.page.title'))),
+                h('h1', { className: 'sm-title' }, t('sleep-memory.page.title')),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', onClick: () => setManagementView('status') }, '管理')),
 
-              h(StatsCard, { stats, onRefresh: reloadStats }),
-              h(RuntimeStatus),
-              h(ScopePanel),
-              h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } }),
+              h(StatsCard, { stats, onRefresh: onRecordsChanged }),
+              h(RuntimeSummary, { ...runtime, sleeping, onOpen: () => setManagementView('status') }),
 
               h(SleepBanner, { report, onDismiss: () => setReport(null) }),
 
@@ -1157,9 +1420,13 @@ window.__ModuleLoader__.load({
 
               view === 'browse' ? h(React.Fragment, null,
                 h('div', { className: 'sm-listhead' },
-                  h('h2', { className: 'sm-listtitle' }, t('sleep-memory.browse.title')),
+                  h('h2', { className: 'sm-listtitle' }, '筛选结果'),
                   h('span', { className: 'sm-count' }, t('sleep-memory.browse.count', { n: total })),
-                  h('span', { className: 'sm-spring' })),
+                  hasMore ? h('span', { className: 'sm-count' }, `已加载 ${items.length} 条`) : null,
+                  h('span', { className: 'sm-spring' }),
+                  !projectFilter && !globalOnly ? h('label', { className: 'sm-group-toggle' },
+                    h('input', { type: 'checkbox', checked: grouped, onChange: (event) => setGrouped(event.target.checked) }), '按项目分组')
+                    : projectFilter && !globalOnly ? h('span', { className: 'sm-count' }, '包含全局公共记忆') : null),
                 h('div', { className: 'sm-toolbar' },
                   h('div', { className: 'sm-toolbar-grow' },
                     h('input', {
@@ -1171,9 +1438,8 @@ window.__ModuleLoader__.load({
                   h('select', { className: 'sm-select', value: validity, 'aria-label': '有效性筛选', onChange: (event) => setValidity(event.target.value) },
                     ...Object.entries(STATE_LABELS).map(([key, label]) => h('option', { key, value: key }, label)),
                     h('option', { value: 'all' }, '全部历史')),
-                  h('input', { className: 'sm-search sm-project-filter', value: projectFilter, disabled: globalOnly, placeholder: '项目标识，留空浏览全部项目',
-                    'aria-label': '项目筛选', onChange: (event) => setProjectFilter(event.target.value) }),
-                  h('label', null, h('input', { type: 'checkbox', checked: globalOnly, onChange: (event) => setGlobalOnly(event.target.checked) }), '仅全局'),
+                  h(ProjectPicker, { projects, projectId: projectFilter, globalOnly,
+                    onChange: (selection) => { setProjectFilter(selection.projectId); setGlobalOnly(selection.globalOnly); } }),
                   h('select', {
                     id: 'sm-layer', className: 'sm-select', value: layer,
                     'aria-label': t('sleep-memory.filter.label'),
@@ -1181,6 +1447,7 @@ window.__ModuleLoader__.load({
                   },
                   h('option', { value: 'all' }, t('sleep-memory.filter.all')),
                   LAYERS.map((name) => h('option', { key: name, value: name }, t(`sleep-memory.layer.${name}`))))),
+                stats?.projectError ? h('p', { className: 'sm-runtime-note', role: 'status' }, stats.projectError) : null,
                 browseBody) : null,
 
               view === 'scatter' ? h('div', { className: 'sm-listhead' },
@@ -1193,13 +1460,23 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'sm-count' }, edgesList === null ? '' : t('sleep-memory.edges.count', { n: edgesList.length }))) : null,
               view === 'edges' ? h(EdgesView, { edges: edgesList }) : null,
 
+              h(MemoryDialog, { id: 'sm-manager', title: '记忆管理', open: managementView !== null, onClose: () => setManagementView(null) },
+                h('div', { className: 'sm-manager-tabs', role: 'group', 'aria-label': '记忆管理分类' },
+                  [['status', '运行详情'], ['scope', '会话范围'], ['backup', '备份恢复']].map(([key, label]) =>
+                    h('button', { key, type: 'button', className: 'sm-btn sm-btn-quiet', 'aria-pressed': managementView === key,
+                      'aria-controls': `sm-manager-${key}`, onClick: () => setManagementView(key) }, label))),
+                h('div', { id: 'sm-manager-status', hidden: managementView !== 'status' }, h(RuntimeStatus, { ...runtime, sleeping })),
+                h('div', { id: 'sm-manager-scope', hidden: managementView !== 'scope' }, h(ScopePanel)),
+                h('div', { id: 'sm-manager-backup', hidden: managementView !== 'backup' },
+                  h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } }))),
               h(Toast, { toast })));
         }
 
         // ---- bundle detail page inline config (plugins.bundle.config) --------
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
-          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays'];
+          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
+          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
         function configDraftFrom(fields) {
@@ -1318,6 +1595,9 @@ window.__ModuleLoader__.load({
 
           const rows = [];
           for (const [key, label, hint] of [
+            ['autoLearnEnabled', '自主学习有用信息', '完成对话后后台提取有来源的事实和经验；冲突内容标记待复核'],
+            ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
+            ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
             ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
           ]) {
@@ -1460,12 +1740,16 @@ window.__ModuleLoader__.load({
           }, MemoryBankPage));
           if (typeof main === 'function') disposers.push(main);
 
-          const bundleConfig = bind('bundleConfig', 'plugins.bundle.config', () => ctx.slots.register({
-            name: 'plugins.bundle.config',
-            key: PACKAGE_ID,
-            locale: NS,
-          }, BundleConfigSection));
-          if (typeof bundleConfig === 'function') disposers.push(bundleConfig);
+          for (const packageId of CONFIG_PACKAGE_IDS) {
+            const bundleConfig = bind('bundleConfig', 'plugins.bundle.config', () => ctx.slots.register({
+              name: 'plugins.bundle.config', key: packageId, locale: NS,
+            }, BundleConfigSection));
+            if (typeof bundleConfig === 'function') disposers.push(bundleConfig);
+            const rowConfig = bind('rowConfig', 'plugins.row.config', () => ctx.slots.register({
+              name: 'plugins.row.config', key: `${packageId}#${SLOT_ID}`, locale: NS,
+            }, BundleConfigSection));
+            if (typeof rowConfig === 'function') disposers.push(rowConfig);
+          }
 
           // Mount the Remote bridge eagerly so the stats card has data on the
           // first paint rather than after a round trip from the panel.

@@ -60,7 +60,11 @@ export function createHarness(config = {}, services = {}) {
         effect: (effect) => effects.push(effect),
         get: services.get ?? (() => undefined),
         llm: services.llm,
-    }, { sleepIntervalMinutes: 0, dreamMaxCandidates: 0, salientScoringEnabled: false, ...config })
+    }, {
+        sleepIntervalMinutes: 0, dreamMaxCandidates: 0, salientScoringEnabled: false,
+        // 基础契约使用确定性检索；智能管线测试显式启用并提供模型替身。
+        autoLearnEnabled: false, recallReviewEnabled: false, ...config,
+    })
     return {
         table, data, runtimeData, tools, handlers, writes, api: provided.get('sleepMemoryApi'),
         call: (name, args, execution) => tools.get(name).execute(args, execution),
