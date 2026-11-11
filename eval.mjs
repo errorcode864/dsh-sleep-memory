@@ -59,6 +59,85 @@ const context = { agent: { id: '评测会话' } }
 const written = await scoped.call('memory_write', { kind: 'fact', content: '构建参数 BUILD_FLAG_42' }, context)
 const scopedRecall = await scoped.call('memory_recall', { query: 'BUILD_FLAG_42' }, context)
 results.push({ 场景: '宿主工作区范围召回', 通过: scopedRecall.hits[0]?.id === written.id, 返回条数: scopedRecall.count })
+const relevance = createHarness()
+await relevance.table.put('smm_proxy', fixture('smm_proxy', {
+    content: 'GitHub 网络连接失败，代理 127.0.0.1:7897 不可用，建议使用 SSH。',
+}))
+for (const query of ['排查 enroll 的 del_flag，0 存在 1 删除', '0 1 127 7897', '检查当前项目的删除标识']) {
+    const response = await injectMessage(relevance, createMessage(query))
+    results.push({ 场景: `数字与通用词隔离：${query}`, 通过: response.messages.length === 1, 返回条数: response.messages.length - 1 })
+}
+await relevance.table.put('smm_rule', fixture('smm_rule', {
+    content: 'enroll 的逻辑删除字段 del_flag 使用 0 表示存在、1 表示删除。',
+}))
+const relevant = await injectMessage(relevance, createMessage('排查 enroll 的 del_flag，0 存在 1 删除'))
+results.push({
+    场景: '删除标识正确召回且不强化网络记忆',
+    通过: relevant.messages[1]?.source.recalled.join(',') === 'smm_rule' && relevance.table.get('smm_proxy').accessCount === 0,
+    返回条数: relevant.messages[1]?.source.recalled.length ?? 0,
+})
+const entityScenarios = [
+    {
+        name: '数字角色区分：HTTP 状态码与端口',
+        query: 'HTTP404 错误',
+        correct: 'HTTP 状态码 404 表示资源不存在，应检查路由。',
+        wrong: '开发服务监听端口 404。HTTP 500 表示服务器错误。',
+    },
+    {
+        name: '端口精确匹配',
+        query: '443端口的配置',
+        correct: 'HTTPS 端口 443 由网关监听。',
+        wrong: '管理服务端口 8443 由网关监听。',
+    },
+    {
+        name: '完整版本精确匹配',
+        query: 'Spring Boot 3.2.11 的配置',
+        correct: 'Spring Boot 3.2.11 的项目配置已验证。',
+        wrong: 'Spring Boot 3.2.12 的项目配置待验证。',
+    },
+    {
+        name: '完整路径精确匹配',
+        query: '/srv/exam/config.yml 配置',
+        correct: '配置文件位于 /srv/exam/config.yml。',
+        wrong: '配置文件位于 /srv/other/config.yml。',
+    },
+    {
+        name: '同端口不同 IP 的隔离',
+        query: '代理 127.0.0.1:7897',
+        correct: '本机代理地址为 127.0.0.1:7897。',
+        wrong: '备用代理地址为 127.0.0.2:7897。',
+    },
+    {
+        name: '连字符设备标识精确匹配',
+        query: '检查 dm-244',
+        correct: 'dm-244 是开发数据库节点。',
+        wrong: 'dm-245 是测试数据库节点。',
+    },
+    {
+        name: '完整字段区分相似组件',
+        query: 'del_flag',
+        correct: 'del_flag 表示记录逻辑删除状态。',
+        wrong: 'status_flag 表示账号启用状态。',
+    },
+    {
+        name: '字段值绑定保留数字语义',
+        query: 'del_flag=0',
+        correct: 'del_flag 为 0 表示记录存在。',
+        wrong: 'del_flag 为 1 表示记录已删除。',
+    },
+]
+for (const scenario of entityScenarios) {
+    const harness = createHarness()
+    await harness.table.put('smm_expected', fixture('smm_expected', { content: scenario.correct }))
+    await harness.table.put('smm_forbidden', fixture('smm_forbidden', { content: scenario.wrong }))
+    const response = await injectMessage(harness, createMessage(scenario.query))
+    const recalled = response.messages[1]?.source.recalled ?? []
+    results.push({
+        场景: scenario.name,
+        通过: recalled.length === 1 && recalled[0] === 'smm_expected' && harness.table.get('smm_forbidden').accessCount === 0,
+        返回条数: recalled.length,
+    })
+}
 console.table(results)
 const passed = results.filter((result) => result.通过).length
 console.log(`确定性检索评测：${passed}/${results.length}。未调用真实 LLM，不代表同义改写的总体召回率。`)

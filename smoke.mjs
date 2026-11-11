@@ -4,7 +4,12 @@
  * 用法：node smoke.mjs
  */
 import assert from 'node:assert/strict'
-import { apply } from './index.js'
+import { apply as applyPlugin } from './index.js'
+
+// 旧 smoke 验证工具与词面检索契约，智能管线由独立测试覆盖。
+const apply = (context, config) => applyPlugin(context, {
+  autoLearnEnabled: false, recallReviewEnabled: false, salientScoringEnabled: true, ...config,
+})
 
 const recordParsers = new WeakMap()
 /** 内存版 KvTable：默认镜像 rc.5 接口，可选新版批量删除；缺失记录不能 update，读取返回快照迭代器。 */
@@ -476,7 +481,7 @@ assert.throws(() => apply({ storageDomain: ctx.storageDomain, tools: ctx.tools, 
 /** 模拟一条用户消息（鸭子形状，对齐 UserMessage 的插件可见子集）。 */
 function userMessage(id, text, source) {
   return source === undefined
-    ? { id, role: 'user', content: [{ type: 'text', text }] }
+    ? { id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }
     : { id, role: 'user', content: [{ type: 'text', text }], source }
 }
 

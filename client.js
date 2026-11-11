@@ -1179,7 +1179,7 @@ window.__ModuleLoader__.load({
 
         /** 运行详情区分持久调度与本次加载计数，零计数默认收起。 */
         function RuntimeStatus({ state, error, sleeping }) {
-          const hasActivity = state && [state.scoring, state.expansion, state.injection]
+          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review]
             .some((counters) => Object.values(counters ?? {}).some((value) => value > 0));
           const infoRow = (label, value) => h('div', { key: label }, h('dt', null, label), h('dd', null, value));
           const counterRow = (label, value) => h('tr', { key: label }, h('th', { scope: 'row' }, label), h('td', null, value));
@@ -1203,6 +1203,8 @@ window.__ModuleLoader__.load({
                   h('table', { className: 'sm-runtime-counters', 'aria-label': '本次加载诊断计数' },
                     h('tbody', null,
                       counterRow('情绪评分', `已尝试 ${state.scoring?.attempted ?? 0} 次，写入 ${state.scoring?.stored ?? 0} 条，跳过 ${state.scoring?.skipped ?? 0} 次，失败 ${state.scoring?.failed ?? 0} 次`),
+                      counterRow('自主学习', `写入 ${state.learning?.stored ?? 0} 条，重复 ${state.learning?.duplicates ?? 0} 条，待复核 ${state.learning?.reviewRequired ?? 0} 条，失败 ${state.learning?.failed ?? 0} 次；${state.learning?.lastReason ?? '尚未运行'}`),
+                      counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
                       counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
                       counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`))))))
               : !error ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取运行状态…') : null);
@@ -1473,7 +1475,8 @@ window.__ModuleLoader__.load({
         // ---- bundle detail page inline config (plugins.bundle.config) --------
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
-          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays'];
+          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
+          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
         function configDraftFrom(fields) {
@@ -1592,6 +1595,9 @@ window.__ModuleLoader__.load({
 
           const rows = [];
           for (const [key, label, hint] of [
+            ['autoLearnEnabled', '自主学习有用信息', '完成对话后后台提取有来源的事实和经验；冲突内容标记待复核'],
+            ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
+            ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
             ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
           ]) {

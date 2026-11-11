@@ -24,6 +24,20 @@ export function getEventRange(record) {
 /** 扩展字段均为可选，旧格式不需要读时回写。 */
 export function validateMetadata(value) {
     const problems = []
+    if (value.learning !== undefined) {
+        const learning = value.learning
+        if (!learning || typeof learning !== 'object' || Array.isArray(learning)
+            || !['preference', 'project-fact', 'procedure', 'lesson'].includes(learning.category)
+            || typeof learning.reason !== 'string' || !learning.reason.trim() || learning.reason.length > 300
+            || !Array.isArray(learning.relatedIds) || learning.relatedIds.length > 20
+            || learning.relatedIds.some((id) => typeof id !== 'string' || !id.startsWith('smm_'))
+            || !Array.isArray(learning.evidence) || learning.evidence.length < 1 || learning.evidence.length > 3
+            || learning.evidence.some((evidence) => !evidence || typeof evidence.messageId !== 'string'
+                || !evidence.messageId || evidence.messageId.length > 200 || typeof evidence.quote !== 'string'
+                || evidence.quote.trim().length < 8 || evidence.quote.length > 500)) {
+            problems.push('自动学习信息必须包含合法的类别、用途和原文证据')
+        }
+    }
     if (value.projectId !== undefined && value.projectId !== null
         && (typeof value.projectId !== 'string' || !value.projectId.trim()
             || value.projectId !== value.projectId.trim() || value.projectId.length > 200)) {

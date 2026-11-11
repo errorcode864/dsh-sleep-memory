@@ -122,7 +122,10 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 3)
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 6)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展']) {
+            assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
+        }
         const project = inputs.find((node) => node.props.type === 'text')
         project.props.onChange({ target: { value: '项目甲' } })
         tree = await client.render(component, { view: 'page' })
@@ -131,6 +134,10 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         save.props.onClick()
         await flushTasks()
         assert.equal(override.projectId, '项目甲')
+        await host.api.setConfig({ changes: { autoLearnEnabled: false, recallReviewEnabled: false, semanticRecallEnabled: true } })
+        assert.equal(override.autoLearnEnabled, false)
+        assert.equal(override.recallReviewEnabled, false)
+        assert.equal(override.semanticRecallEnabled, true)
         assert.ok(client.registrations[0].descriptors.some((descriptor) => descriptor.method === 'status' && descriptor.parameters.length === 0))
         await assert.rejects(host.api.setConfig({ changes: { projectId: ' 甲 ' } }), /projectId/)
     } finally { client.dispose() }

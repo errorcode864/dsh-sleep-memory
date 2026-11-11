@@ -25,6 +25,8 @@ import {
   createMemoryId, createRecordView, getEventRange, getProjectId, matchesProject, validateMetadata,
 } from './memory-contract.js'
 import { executeMemoryManagement, isExtendedAction } from './memory-management.js'
+import { createMemoryIntelligence } from './memory-intelligence.js'
+import { buildRetrievalIndex, retrievalTerms, scoreRetrieval } from './memory-retrieval.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
   initialSchedule, failedSchedule, nextSleepTime, memoryVersion, createInjectionTracker,
@@ -48,23 +50,8 @@ const ID_PREFIX = 'smm_'
 /** 所有持久层。M1 只有 surface 与 salient 的写入者；deep/archive 由 M2 睡眠整理产出。 */
 const LAYERS = ['surface', 'deep', 'archive', 'salient']
 
-/** BM25 参数：Robertson/Spärck Jones 推荐值，属于检索算法协议常数，不随部署变化。 */
-const BM25_K1 = 1.2
-const BM25_B = 0.75
-/** 自动注入忽略常见请求用语，避免通用词重叠被当成主题相关性。 */
-const INJECTION_STOP_WORDS = new Set([
-  '可以', '需要', '一下', '看看', '这个', '那个', '这些', '那些', '我们', '你们', '他们',
-  '是否', '什么', '怎么', '如何', '现在', '当前', '已经', '之前', '之后', '然后',
-  '进行', '使用', '用户', '请问', '帮我', '继续',
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'continue', 'do', 'for', 'from',
-  'has', 'have', 'i', 'in', 'is', 'it', 'of', 'on', 'or', 'please', 'that',
-  'the', 'this', 'to', 'was', 'we', 'with', 'you',
-])
-const INJECTION_STOP_PHRASES = new RegExp(
-  [...INJECTION_STOP_WORDS].filter((word) => /^[\u4e00-\u9fff]+$/.test(word)).join('|'), 'g',
-)
 const MEMORY_INPUT_FIELDS = {
-  projectId: { type: ['string', 'null'], description: '稳定项目标识；缺省采用会话/工作区/配置范围，null 显式指定全局' },
+  projectId: { oneOf: [{ type: 'string' }, { type: 'null' }], description: '稳定项目标识；缺省采用会话/工作区/配置范围，null 显式指定全局' },
   source: {
     type: 'object', description: '来源信息；只有用户明确确认后才标记 confirmed',
     properties: {
@@ -73,7 +60,7 @@ const MEMORY_INPUT_FIELDS = {
     },
     required: ['kind'], additionalProperties: false,
   },
-  occurredAt: { type: 'integer', minimum: 0, description: '事件发生的毫秒时间戳，缺省为写入时刻' },
+  occurredAt: { type: 'integer', description: '事件发生的毫秒时间戳（非负），缺省为写入时刻' },
 }
 
 /**
@@ -163,13 +150,13 @@ function resolveConfig(raw) {
   // ---- 每轮自动注入与情绪评分（M4）-----------------------------------------
   booleanField('injectEnabled', true) // 每轮把相关记忆自动注入模型上下文
   numberField('injectBudget', 'integer', 0, 10, 3) // 单轮注入的直接命中上限，0 = 不注入内容
-  numberField('injectMinScore', 'number', 0, 100, 0.5) // 低于此 BM25 分数的直接命中不注入
+  numberField('injectMinScore', 'number', 0, 100, 0.2) // 去除单字和数字噪声后的候选门槛，最终由相关性审核决定
   numberField('injectMaxCharsPerHit', 'integer', 100, 8_000, 400) // 注入时单条记忆内容截断长度
   numberField('injectMaxTotalChars', 'integer', 300, 32_000, 4_000)
   numberField('injectRepeatAfterTurns', 'integer', 0, 100, 3)
   numberField('salientDecayHalfLifeDays', 'integer', 0, 3650, 0)
   numberField('salientReviewAfterDays', 'integer', 0, 3650, 0)
-  booleanField('salientScoringEnabled', true) // 用 LLM 为每轮用户消息做效价×唤醒度评分
+  booleanField('salientScoringEnabled', false) // 情绪不等于可复用知识，原始情绪沉淀改为按需开启
   booleanField('sleepOnStart', false) // 明确开启后，加载时仅首次或到期补跑
   delete unknown.projectId
   if (source.projectId !== undefined && (typeof source.projectId !== 'string'
@@ -184,6 +171,14 @@ function resolveConfig(raw) {
   numberField('semanticRecallWeight', 'number', 0, 1, 0.5) // 扩展词 BM25 分的加权系数（与原词分相加）
   numberField('semanticRecallTimeoutMs', 'integer', 500, 30_000, 3_000) // 扩展调用超时（注入路径延迟敏感，短于评分超时）
   numberField('semanticMaxTerms', 'integer', 1, 20, 8) // 参与混合召回的扩展检索词上限
+
+  // 普通知识在轮次完成后学习，候选召回在进入上下文前独立审核。
+  booleanField('autoLearnEnabled', true)
+  numberField('autoLearnMaxItems', 'integer', 1, 5, 3)
+  numberField('autoLearnTimeoutMs', 'integer', 500, 120_000, 30_000)
+  booleanField('recallReviewEnabled', true)
+  numberField('recallReviewTimeoutMs', 'integer', 500, 30_000, 3_000)
+  numberField('recallCandidateBudget', 'integer', 1, 30, 12)
 
   // ---- 记忆管理（M6）--------------------------------------------------------
   numberField('manageListMaxItems', 'integer', 1, 500, 50) // list 单次返回条数上限（同时约束调用方 limit）
@@ -290,8 +285,8 @@ function salienceBranch(valence) {
 }
 
 /**
- * 中英文混合分词：ASCII 词元 + CJK 单字与相邻二元组（二元组提供区分度，
- * 单字保证单字查询可命中）。
+ * 睡眠巩固与联想建边沿用原有词向量，避免检索改进改变历史记忆的合并判断。
+ * 对话检索使用 memory-retrieval.js 的词级分析与技术实体边界。
  * @param {string} text
  * @returns {string[]}
  */
@@ -305,59 +300,6 @@ function tokenize(text) {
     for (let i = 0; i < chars.length - 1; i++) tokens.push(chars[i] + chars[i + 1])
   }
   return tokens
-}
-
-/** 自动注入要求中文二元组或有效 ASCII 词元；单字查询仍由显式召回支持。 */
-function tokenizeForInjection(text) {
-  // 先分隔通用短语，避免“你可以”产生“你可”这类跨词噪声。
-  return tokenize(text.replace(INJECTION_STOP_PHRASES, ' ')).filter((token) => !/^[\u4e00-\u9fff]$/.test(token)
-    && !INJECTION_STOP_WORDS.has(token))
-}
-
-/** 文档的 BM25 词频索引。 */
-function buildBm25Index(docTokens) {
-  /** @type {Map<string, number>[]} */
-  const termFreqs = docTokens.map((tokens) => {
-    const tf = new Map()
-    for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1)
-    return tf
-  })
-  const df = new Map()
-  for (const tf of termFreqs) {
-    for (const term of tf.keys()) df.set(term, (df.get(term) ?? 0) + 1)
-  }
-  const totalLen = docTokens.reduce((sum, tokens) => sum + tokens.length, 0)
-  return {
-    termFreqs,
-    df,
-    lens: docTokens.map((tokens) => tokens.length),
-    avgLen: totalLen / Math.max(1, docTokens.length),
-  }
-}
-
-/**
- * 查询的 BM25 分数（查询内重复词元只计一次）。
- * @returns {number[]} 与文档等长的分数数组
- */
-function bm25Scores(index, queryTokens) {
-  const scores = new Array(index.termFreqs.length).fill(0)
-  const seen = new Set()
-  for (const term of queryTokens) {
-    if (seen.has(term)) continue
-    seen.add(term)
-    const df = index.df.get(term)
-    if (df === undefined) continue
-    const idf = Math.log(1 + (index.termFreqs.length - df + 0.5) / (df + 0.5))
-    index.termFreqs.forEach((tf, i) => {
-      const freq = tf.get(term)
-      if (freq === undefined) return
-      const len = Math.max(1, index.lens[i])
-      scores[i] += idf
-        * (freq * (BM25_K1 + 1))
-        / (freq + BM25_K1 * (1 - BM25_B + BM25_B * len / index.avgLen))
-    })
-  }
-  return scores
 }
 
 /**
@@ -478,6 +420,8 @@ function spreadActivation(all, ranked, scope) {
         if (getProjectId(neighbor) !== getProjectId(source)) continue
         if (scope.layerFilter !== undefined && !scope.layerFilter.includes(neighbor.layer)) continue
         if (scope.timeFilter !== undefined && !inTimeWindow(neighbor, scope.timeFilter)) continue
+        // 精确实体冲突既不能作为联想结果，也不能成为继续扩散的中间节点。
+        if (scope.conflictingEntityIds?.has(link.to)) continue
         const act = activation * link.weight * damp * neighbor.strength
         if (act < scope.cfg.spreadMinActivation) continue
         const existing = activated.get(link.to)
@@ -1082,43 +1026,37 @@ async function runRecallCore(table, query, scope) {
     return { ranked: [], associated: [], totalCandidates: candidates.length, now }
   }
 
-  const queryTokens = tokenize(query)
-  const injectionTokens = scope.automatic ? tokenizeForInjection(query) : undefined
   // 自动注入没有有效检索词时直接跳过，不能沿用显式按层浏览的全库回退。
-  if (injectionTokens?.length === 0) {
+  if (scope.automatic && retrievalTerms(query).length === 0) {
     return { ranked: [], associated: [], totalCandidates: candidates.length, now }
   }
-  const docTexts = candidates.map(([, rec]) => [rec.content, ...rec.tags, ...rec.keywords].join(' '))
-  const docTokens = docTexts.map(tokenize)
-  const index = buildBm25Index(docTokens)
-  const scores = queryTokens.length > 0 ? bm25Scores(index, queryTokens) : docTokens.map(() => 0)
-  // 语义扩展（M8）：同一候选集上对扩展检索词再算一次 BM25，按权重加到原词分上；
-  // 扩展词为空（未启用或扩展失败）时 expandedScores 为空数组，退化为纯 BM25。
-  const expandedTokens = expandedTerms !== undefined && expandedTerms.length > 0
-    ? tokenize(expandedTerms.join(' '))
-    : []
-  const expandedScores = expandedTokens.length > 0 ? bm25Scores(index, expandedTokens) : []
-  const injectionTerms = injectionTokens ? new Set([
-    ...injectionTokens, ...tokenizeForInjection(expandedTerms?.join(' ') ?? ''),
-  ]) : undefined
+  const index = buildRetrievalIndex(candidates.map(([, rec]) => [rec.content, ...rec.tags, ...rec.keywords]))
+  const scores = scoreRetrieval(index, query, { automatic: scope.automatic })
+  const expandedScores = expandedTerms?.length
+    ? scoreRetrieval(index, expandedTerms.join('\n'), { automatic: scope.automatic }) : []
   const ranked = candidates
     .map(([id, rec], i) => {
-      let score = scores[i]
+      const direct = scores[i]
+      let score = direct.score
       if (i < expandedScores.length) {
-        score += cfg.semanticRecallWeight * expandedScores[i]
+        score += cfg.semanticRecallWeight * expandedScores[i].score
       }
       if (rec.layer === 'salient' && rec.arousal !== null) {
         score *= 1 + cfg.salienceRecallBoost * rec.arousal
       }
-      // 在预算截断前排除只有单字、通用词重叠的候选，保留既有 BM25 分数门槛。
-      if (injectionTerms && !tokenizeForInjection(docTexts[i]).some((term) => injectionTerms.has(term))) score = 0
-      return { id, rec, score }
+      // 原查询中的精确实体冲突不能被扩展词或情绪加成绕过。
+      if (direct.conflicts.length > 0) score = 0
+      // 扩展权重只调整排序，不把可靠的同义候选压到门槛以下；最终仍须通过有效词与审核。
+      const thresholdScore = score > 0 ? Math.max(score, expandedScores[i]?.score ?? 0) : 0
+      const retrieval = { ...direct.evidence, ...(expandedScores[i]?.score > 0 ? { expanded: expandedScores[i].evidence } : {}) }
+      return { id, rec, score, thresholdScore, retrieval }
     })
-    .filter((hit) => (hit.score > 0 || queryTokens.length === 0) && hit.score >= (scope.minScore ?? 0))
+    .filter((hit) => (hit.score > 0 || query.trim() === '') && hit.thresholdScore >= (scope.minScore ?? 0))
     .sort((a, b) => b.score - a.score || b.rec.lastAccessAt - a.rec.lastAccessAt)
     .slice(0, limit)
 
-  const associated = spreadActivation(all, ranked, { ...scope, layerFilter, timeFilter, cfg })
+  const conflictingEntityIds = new Set(candidates.filter((_, index) => scores[index].conflicts.length > 0).map(([id]) => id))
+  const associated = spreadActivation(all, ranked, { ...scope, layerFilter, timeFilter, cfg, conflictingEntityIds })
   return { ranked, associated, totalCandidates: candidates.length, now }
 }
 
@@ -1292,6 +1230,9 @@ const GUI_CONFIG_FIELDS = [
   { key: 'injectRepeatAfterTurns', type: 'integer', min: 0, max: 100 },
   { key: 'salientDecayHalfLifeDays', type: 'integer', min: 0, max: 3650 },
   { key: 'salientReviewAfterDays', type: 'integer', min: 0, max: 3650 },
+  { key: 'autoLearnEnabled', type: 'boolean' },
+  { key: 'recallReviewEnabled', type: 'boolean' },
+  { key: 'semanticRecallEnabled', type: 'boolean' },
 ]
 
 function apiFail(code, message) {
@@ -1627,6 +1568,7 @@ export function apply(ctx, config) {
       ...runtime, sleeping, projectId: cfg.projectId || null, schedule: scheduleLoaded ? scheduleState : null,
       sleepIntervalMinutes: cfg.sleepIntervalMinutes, sleepOnStart: cfg.sleepOnStart,
       salientScoringEnabled: cfg.salientScoringEnabled, semanticRecallEnabled: cfg.semanticRecallEnabled,
+      autoLearnEnabled: cfg.autoLearnEnabled, recallReviewEnabled: cfg.recallReviewEnabled,
     })
   }
   // 同一插件实例内串行读改写，防止睡眠快照覆盖已提交的召回强化或事实纠正。
@@ -1662,6 +1604,7 @@ export function apply(ctx, config) {
     disposed = true
     clearTimeout(scheduleTimer)
     for (const controller of controllers) controller.abort()
+    await intelligence.drain()
     await mutations
     const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise])
     for (const domain of domains) if (domain.status === 'fulfilled') await domain.value.close()
@@ -1681,6 +1624,11 @@ export function apply(ctx, config) {
     if (Object.hasOwn(args, 'projectId')) return { projectId: args.projectId, source: 'explicit', sessionId }
     return resolveMemoryScope(args, sessionId, await runtimeRecords(), cfg, workspaceScopes())
   }
+  const intelligence = createMemoryIntelligence({
+    ctx, cfg, records, resolveScope, withMutation, controllers,
+    tokenize: retrievalTerms, isDisposed: () => disposed,
+  })
+  Object.assign(runtime, intelligence.state)
   const manageScope = async (args, contextSessionId) => {
     const sessionId = args.sessionId ?? contextSessionId
     if (sessionId !== null && sessionId !== undefined && !isSessionId(sessionId)) {
@@ -2219,6 +2167,16 @@ export function apply(ctx, config) {
             layer: { type: 'string' },
             kind: { type: 'string' },
             score: { type: 'number' },
+            retrieval: {
+              type: 'object',
+              properties: {
+                matchedTerms: { type: 'array', items: { type: 'string' } },
+                matchedEntities: { type: 'array', items: { type: 'string' } },
+                coverage: { type: 'number', description: '查询词覆盖率，0~1' },
+                expanded: { type: 'object' },
+              },
+              required: ['matchedTerms', 'matchedEntities', 'coverage'],
+            },
             ageDays: { type: 'number' },
             linkedMemories: { type: 'integer' },
             tags: { type: 'array', items: { type: 'string' } },
@@ -2251,6 +2209,7 @@ export function apply(ctx, config) {
       '每条 hit 的 drift 字段说明修饰程度；需要逐字原文（如引用用户原话）时用 fidelity:"raw"。',
       'salient 层的记忆带情绪分支：⚠️ 警示（负面教训）或 ✦ 激励（正面经验），命中后应影响当前判断。',
       '实际返回的直接命中会强化记忆。没有命中只表示本次未检索到，不证明历史上不存在。',
+      '直接命中的 retrieval 列出匹配词、完整实体与查询覆盖度；score 是排序分，不是相关概率。',
       'raw 模式和时间窗查询可检索已巩固的原始成员；用 memory_manage get 按 ID 追溯全文及来源。',
       'projectId 缺省采用会话/工作区/配置范围，null 显式指定全局；includeGlobal:false 排除全局。',
       '待复核内容仅显式召回并标注 lifecycle，不强化；已失效内容只能按 ID 追溯。',
@@ -2264,8 +2223,8 @@ export function apply(ctx, config) {
         fidelity: { type: 'string', enum: ['recall', 'raw'], description: 'recall=记忆化呈现（默认）；raw=未修饰原文' },
         limit: { type: 'integer', description: '最多返回条数，默认取配置 recallBudget' },
         layers: { type: 'array', items: { type: 'string' }, description: '限定检索的记忆层，缺省为全部' },
-        since: { type: 'integer', minimum: 0, description: '时间窗起点（毫秒时间戳，含），按 createdAt 硬过滤' },
-        until: { type: 'integer', minimum: 0, description: '时间窗终点（毫秒时间戳，含），按 createdAt 硬过滤' },
+        since: { type: 'integer', description: '时间窗起点（非负毫秒时间戳，含），按 createdAt 硬过滤' },
+        until: { type: 'integer', description: '时间窗终点（非负毫秒时间戳，含），按 createdAt 硬过滤' },
         projectId: MEMORY_INPUT_FIELDS.projectId,
         includeGlobal: { type: 'boolean', description: '项目检索是否包含全局，默认 true' },
         timeField: { type: 'string', enum: ['createdAt', 'occurredAt'], description: '时间窗所用时间维度' },
@@ -2317,6 +2276,7 @@ export function apply(ctx, config) {
         hits: [
           ...ranked.map((hit) => ({
             ...presentHit(hit.rec, fidelity, cfg, now), score: Math.round(hit.score * 1000) / 1000,
+            retrieval: hit.retrieval,
             lifecycle: recordView.lifecycleOf(hit.rec),
           })),
           ...associated.map((found) => ({
@@ -2824,14 +2784,14 @@ export function apply(ctx, config) {
         const entered = /** @type {{messages: unknown[]}} */ (decision).messages
         if (!Array.isArray(entered) || entered.length === 0) return decision
         const claimed = payload.messages ?? []
-        // 查询文本：claimed 批次里最后一条非本插件 user 消息。
+        // 只使用真实用户消息，不能把 AGENTS.md 或运行时注入作为检索意图。
         let queryText = ''
         let queryMessage = undefined
         for (let i = claimed.length - 1; i >= 0; i--) {
           const message = claimed[i]
           const source = message !== null && typeof message === 'object'
             ? /** @type {{source?: {kind?: unknown}}} */ (message).source?.kind : undefined
-          if (source === 'sleep-memory') continue
+          if (source !== 'user') continue
           const text = messageText(message)
           if (text !== '') { queryText = text; queryMessage = message; break }
         }
@@ -2854,24 +2814,34 @@ export function apply(ctx, config) {
         const expandedTerms = cfg.semanticRecallEnabled
           ? await expandQueryTerms(payload.modelSelection, queryText)
           : undefined
+        const session = injectionTracker.begin(scope.sessionId, scope.projectId, queryMessage?.id)
+        const exclude = (record, lifecycle) => {
+          const seen = injectionTracker.seen(session, memoryVersion(record, lifecycle), cfg.injectRepeatAfterTurns)
+          if (seen) runtime.injection.duplicateSkipped += 1
+          return seen
+        }
+        const core = await runRecallCore(table, queryText, {
+          limit: cfg.recallReviewEnabled ? cfg.recallCandidateBudget : cfg.injectBudget,
+          layerFilter: undefined, cfg, expandedTerms,
+          minScore: cfg.injectMinScore, projectId: scope.projectId, automatic: true, exclude,
+        })
+        const candidates = [...core.ranked, ...core.associated.map((hit) => ({ ...hit, id: hit.rec.id }))]
+        const snapshot = createRecordView([...table.entries()])
+        const versions = new Map(candidates.map((hit) => [hit.id, memoryVersion(hit.rec, snapshot.lifecycleOf(hit.rec))]))
+        // 审核的网络等待不能占用写队列；返回后重新核对事实版本和范围。
+        const approved = await intelligence.review(payload.modelSelection, queryText, scope, candidates, payload.signal)
         return await withMutation(async () => {
-          if (payload.signal?.aborted) return decision
-          const session = injectionTracker.begin(scope.sessionId, scope.projectId, queryMessage?.id)
-          const exclude = (record, lifecycle) => {
-            const seen = injectionTracker.seen(session, memoryVersion(record, lifecycle), cfg.injectRepeatAfterTurns)
-            if (seen) runtime.injection.duplicateSkipped += 1
-            return seen
-          }
-          const core = await runRecallCore(table, queryText, {
-            limit: cfg.injectBudget, layerFilter: undefined, cfg, expandedTerms,
-            minScore: cfg.injectMinScore, projectId: scope.projectId, automatic: true, exclude,
-          })
+          if (payload.signal?.aborted || (await resolveScope({}, scope.sessionId)).projectId !== scope.projectId) return decision
           const view = createRecordView([...table.entries()])
           const direct = []
           const associated = []
           // 整体预算含标题、来源、关联说明；放不下的条目不注入也不强化。
           const append = (hit, isAssociated) => {
-            if (isAssociated && exclude(hit.rec, view.lifecycleOf(hit.rec))) return
+            const current = table.get(hit.rec.id)
+            if (!current || !approved.has(current.id) || !view.isRecallable(current, true)
+              || memoryVersion(current, view.lifecycleOf(current)) !== versions.get(current.id)
+              || exclude(current, view.lifecycleOf(current))) return
+            if (!isAssociated && direct.length >= cfg.injectBudget) return
             const target = isAssociated ? associated : direct
             target.push(hit)
             if (recallBlockText({ ranked: direct, associated, now: core.now }, cfg).length > cfg.injectMaxTotalChars) {
@@ -2921,7 +2891,7 @@ export function apply(ctx, config) {
   }).catch((error) => { console.error('[sleep-memory] 睡眠调度初始化失败', error) })
 }
 
-/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number}} MemoryConfig */
+/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallReviewTimeoutMs: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
 /** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
 /** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */

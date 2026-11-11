@@ -69,3 +69,30 @@ test('显式召回仍支持单字查询与按层浏览，自动注入采用更�
     const browsed = await harness.call('memory_recall', { layers: ['surface'] })
     assert.deepEqual(browsed.hits.map((hit) => hit.id), ['smm_theme'])
 })
+
+test('删除标识中的数字不能命中代理 IP，字段主题仍可召回', async () => {
+    const harness = createHarness()
+    await harness.table.put('smm_network', fixture('smm_network', {
+        content: 'GitHub 网络连接失败，代理地址为 127.0.0.1:7897，建议使用 SSH 通道。',
+    }))
+    const query = createMessage('排查下enroll的删除标识,当前项目规范del_flag 0存在1删除,')
+    assert.equal((await injectMessage(harness, query)).messages.length, 1)
+    await harness.table.put('smm_enroll', fixture('smm_enroll', {
+        content: 'enroll 的逻辑删除字段 del_flag 遵循 0 存在、1 删除。',
+    }))
+    const result = await injectMessage(harness, query)
+    assert.deepEqual(result.messages[1].source.recalled, ['smm_enroll'])
+    assert.equal(harness.table.get('smm_network').accessCount, 0)
+})
+
+test('运行时与规范注入不能覆盖真实用户的检索意图', async () => {
+    const harness = createHarness()
+    await harness.table.put('smm_network', fixture('smm_network', { content: 'GitHub 代理网络配置使用 SSH。' }))
+    const user = createMessage('排查 enroll 的删除标识')
+    const system = { ...createMessage('GitHub 代理网络配置'), source: { kind: 'runtime-context' } }
+    const messages = [user, system]
+    const result = await harness.handlers.get('agent/pre-step')(
+        { step: 1, messages }, async () => ({ kind: 'enter', messages }),
+    )
+    assert.equal(result.messages.length, 2)
+})

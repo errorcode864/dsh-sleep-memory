@@ -27,6 +27,8 @@
     "memory-contract.js",
     "memory-management.js",
     "memory-runtime.js",
+    "memory-intelligence.js",
+    "memory-retrieval.js",
     "client.js",
     "cordis.patch.yml",
     "locale",
