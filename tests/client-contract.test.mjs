@@ -126,6 +126,7 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
+        assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
         const project = inputs.find((node) => node.props.type === 'text')
         project.props.onChange({ target: { value: '项目甲' } })
         tree = await client.render(component, { view: 'page' })
@@ -138,6 +139,9 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         assert.equal(override.autoLearnEnabled, false)
         assert.equal(override.recallReviewEnabled, false)
         assert.equal(override.semanticRecallEnabled, true)
+        await host.api.setConfig({ changes: { injectMaxEstimatedTokens: 700 } })
+        assert.equal(override.injectMaxEstimatedTokens, 700)
+        await assert.rejects(host.api.setConfig({ changes: { injectMaxEstimatedTokens: 99 } }), /injectMaxEstimatedTokens/)
         assert.ok(client.registrations[0].descriptors.some((descriptor) => descriptor.method === 'status' && descriptor.parameters.length === 0))
         await assert.rejects(host.api.setConfig({ changes: { projectId: ' 甲 ' } }), /projectId/)
     } finally { client.dispose() }
@@ -283,6 +287,9 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
         const statusTree = await client.render(runtime.type, runtime.props)
         assert.equal(statusTree.props['aria-label'], '记忆运行状态')
         assert.ok(client.calls.some((call) => call.method === 'status'))
+        for (const label of ['学习 Token', '审核 Token', '扩展 Token', '评分 Token', '注入 Token 估算', '按需证据读取']) {
+            assert.ok(flatten(statusTree).some((node) => node.type === 'th' && node.children.includes(label)))
+        }
     } finally { client.dispose() }
 })
 

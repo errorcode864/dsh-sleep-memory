@@ -123,7 +123,7 @@ assert.ok(rawHit, 'raw 模式应命中显著记忆')
 assert.equal(rawHit.content, '用户曾因未备份丢失整周工作，极度懊悔', 'raw 返回原文')
 
 // 9. layers 过滤列出 salient
-const salientOnly = await recall.execute({ layers: ['salient'] })
+const salientOnly = await recall.execute({ layers: ['salient'], fidelity: 'recall' })
 const salientHit = salientOnly.hits.find((h) => h.id === fear.id)
 assert.ok(salientHit, 'salient 过滤应命中')
 assert.match(salientHit.salient.reaction, /⚠️/, '负效价应带警示标注')
@@ -141,7 +141,7 @@ await table.put('smm_fake_archive', {
   valence: null, arousal: null, accessCount: 0, lastAccessAt: now, createdAt: now - 90 * 86_400_000,
   updatedAt: now, rewriteCount: 0, edges: [], supersededBy: null, gist: null,
 })
-const agedRecall = await recall.execute({ query: '很久以前的漫长记录' })
+const agedRecall = await recall.execute({ query: '很久以前的漫长记录', fidelity: 'recall' })
 const agedHit = agedRecall.hits.find((h) => h.id === 'smm_fake_archive')
 assert.ok(agedHit, 'archive 记忆应可召回')
 assert.ok(agedHit.content.endsWith('……'), '低强度 archive 记忆呈现应截断')
@@ -750,7 +750,7 @@ const rMeta = recall.output.presentationMeta(rArgs, rOk)
 assert.equal(rMeta.tool, 'memory_recall')
 assert.equal(rMeta.ok, true)
 assert.equal(rMeta.query, '用户喜欢什么主题')
-assert.equal(rMeta.fidelity, 'recall')
+assert.equal(rMeta.fidelity, 'summary')
 assert.equal(rMeta.count, rOk.count)
 assert.equal(rMeta.hits[rIdx].layer, rOk.hits[rIdx].layer)
 assert.equal(rMeta.hits[rIdx].drift, rOk.hits[rIdx].drift.applied, 'surface 命中 drift=false')
@@ -761,7 +761,7 @@ assert.equal(rView.card, 'generic')
 assert.equal(rView.title, `记忆检索 · ${rOk.count} 条命中`)
 assert.equal(
   rView.content[0].text.split('\n')[0],
-  `「用户喜欢什么主题」→ ${rOk.count} 条命中 / 候选 ${rMeta.totalCandidates}（fidelity: recall）`,
+  `「用户喜欢什么主题」→ ${rOk.count} 条命中 / 候选 ${rMeta.totalCandidates}（fidelity: summary）`,
   '首行是查询摘要',
 )
 // 关联命中：via 标注 + 页脚统计

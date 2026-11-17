@@ -4,7 +4,7 @@ title: 可靠记忆使用与验证
 type: guide
 status: active
 owner: maintainer
-updated: 2026-11-10
+updated: 2026-11-17
 source_of_truth: code-and-script
 ---
 
@@ -19,6 +19,7 @@ source_of_truth: code-and-script
 - [备份与恢复](#备份与恢复)
 - [运行和兼容](#运行和兼容)
 - [验证](#验证)
+- [评测与消耗统计](#评测与消耗统计)
 
 ## 范围和来源
 
@@ -107,6 +108,10 @@ GUI Remote 契约向后兼容扩展：
 `totalSources`、有效性 `lifecycle`、分页纠正链 `chain` 和 `totalChain`。
 没有写入或强化副作用。GUI 原文按钮也使用这个契约。
 `raw` 召回允许检索已巩固成员，但仍遵守项目范围和事实有效性；已纠正事实应按 ID 查看。
+
+`memory_recall` 默认 `fidelity: "summary"`：每条最多抽取 3 个相关原句，单条长度受 `injectMaxCharsPerHit`（默认 400）约束。
+片段带 `truncated: true`，需要引用或执行时先按 ID 读取完整条件与 `record.learning.evidence`；`recall` 保留旧版呈现，`raw` 返回原文。
+摘要只在输出阶段生成，持久正文和证据保持原样；超长单句按匹配位置提取窗口并标明省略。
 
 ```json
 {
@@ -242,12 +247,14 @@ GUI 从记忆银行的“管理 → 备份恢复”进入，导出和导入流�
   分词依赖宿主内置 ICU，不新增外部服务或 npm 包；不同 ICU 版本可能产生不同词边界，
   技术实体与数字语境识别也不承诺覆盖所有格式。
 - `recallReviewEnabled` 默认 true：先取最多 `recallCandidateBudget`（默认 12）条直接候选，
-  连同联想结果交给当前路由的模型审核，再按 `injectBudget` 与字符预算呈现。
-  没有必要使用历史资料时允许零条注入。审核使用完整候选正文的前 1600 个字符，
+  连同联想结果交给当前路由的模型审核，再按条数、字符与 Token 估算预算呈现。
+  没有必要使用历史资料时允许零条注入。审核使用与查询相关的原句摘要，
   最多等待 `recallReviewTimeoutMs`（默认 3000 毫秒）；服务缺失、未知 ID、解析失败、
   非正常结束或超时均跳过本轮注入。关闭该开关可恢复仅词面筛选。
   模型等待在写队列之外完成，审核返回后重新检查范围、生命周期和内容版本，
   防止同时发生的纠正或失效操作被旧审核结果覆盖。
+- `injectMaxEstimatedTokens` 默认 900，与 `injectMaxTotalChars` 同时约束完整注入块；标题、来源与关联说明也占预算。
+  超过任一预算的条目不注入也不强化，原文按需读取。
 - `injectRepeatAfterTurns` 默认 3，按会话、范围与内容版本去重，0 关闭。
   新纠正版本或重新确认的状态可再次注入，显式召回不受影响。
   去重缓存仅在本实例，最多 200 个会话范围、每个 200 个版本；无稳定会话 ID 时
@@ -272,7 +279,7 @@ GUI 从记忆银行的“管理 → 备份恢复”进入，导出和导入流�
 - 正文保存到 surface；`source.kind: model`、`confirmed: false`，
   `source.sessionId/messageId` 指向来源。可选 `learning` 字段保存类别、用途、
   逐字证据和相关旧记忆 ID；随备份校验与恢复，存储域版本仍为 v1。
-- 同范围完全重复的正文不新增；模型还会比较最多 20 条相关或近期记忆。
+- 同范围完全重复的正文不新增；模型还会比较最多 20 条相关或近期记忆的原句摘要。
   语义重复只计数，冲突候选进入 `review`，不会覆盖旧事实，也不会自动注入。
   比较窗口有限，不保证发现整库所有重复与冲突；确认冲突后使用既有 `correct` 流程。
 - 默认等待上限 30000 毫秒，最多并行 4 个后台学习任务，最多缓存 200 个进行中会话。
@@ -327,5 +334,42 @@ DSH_APP_PACKAGE='C:/Software/DSH/resources/app.asar/dsh/package.json' \
 
 完整宿主 Remote 网关、配置修改引起的 reconcile、个人 profile 安装及不同机器
 安装仍未验收。当前验证不替代这些部署检查。
+
+## 评测与消耗统计
+
+`memory_manage {"action":"status"}` 与运行详情返回本次插件加载以来的 `metrics`；重载后归零。
+
+| 字段 | 含义 |
+| --- | --- |
+| `models.learning/review/expansion/scoring` | 按模型调用用途统计次数、失败和累计耗时 |
+| `reported` | 宿主 `usage` 返回的普通输入、输出、缓存读取、缓存写入和推理 Token |
+| `estimated` | 未返回 `usage` 的调用所用字符估算，与实报分开统计 |
+| `injection` | 注入轮数、完整注入块估算及对应持久正文估算 |
+| `retrieval` | 显式检索次数、空结果、耗时与序列化输出 Token 估算 |
+| `evidence` | 工具按 ID 读取原文的次数与输出 Token 估算 |
+| `recentRecalls` | 最近 20 次检索的候选数、返回 ID、耗时和输出估算 |
+
+普通输入与缓存输入按宿主契约分开累计；`totalTokens` 优先采用模型实报，否则累加普通输入、缓存输入和输出，推理数不再次累加。
+调用异常或审核解析失败仍记录已观察到的消耗；超时后无法观测的远端消耗不在统计内。
+诊断轨迹不保存问题或正文，线上误召回率需用人工相关性标签计算。
+
+字符估算采用 ASCII 字符数除以 4、其他 Unicode 字符数乘以 1.5，再向上取整；模型输入另估算消息封装。
+它用于预算判断和同口径对照，不能等同于模型 tokenizer 或实际账单。
+注入正文估算不含标题与来源，因此不能直接当成节省比例；对照比例使用完整输出计算。
+
+```sh
+npm run eval -- --baseline-ref a74d6d9 --report tmp/phase-1-2-comparison.json
+npm run eval -- --cases tests/fixtures/recall-cases.json
+```
+
+评测集格式为 `version/records/cases`，每条问题包含 `id/query/projectId/expected/source`，可使用 `explicitExpected` 区分待复核等场景。
+只有有原始问题依据的用例标注 `user-provided`，其余标注 `constructed`；`knownGap` 说明已知不足。
+输出逐例误召回、漏召回、`Precision@5`、`Recall@5`、MRR、P50/P95 与 Token 估算，空分母显示 null。
+Precision 与 Recall 采用各问题前 5 条结果的汇总条数计算，用户案例另行汇总；MRR 只统计有相关记忆的问题。
+有基线时，任一问题的误召回、漏召回或必需片段出现退化都会导致非零退出；既有不足仍在报告中列出。
+
+2026-11-17 的 22 条问题各执行自动与显式路径；原有 25 项确定性场景单独检查，不等同于检索准确率。
+对照默认关闭 LLM 审核与同义扩展，自动路径仍有误召回和语义漏召回，原始逐例结果见本地 JSON 报告。
+当前只验证本地检索与输出压缩，真实模型审核、线上消耗和更大用户标注集仍需后续验收。
 
 [返回指南索引](README.md)

@@ -144,7 +144,8 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 
 - **`memory_write`**：写入事实或经历，支持项目范围（`projectId`）、来源溯源与事件时间；显著情绪记忆需通过效价/唤醒度阈值。
 - **`memory_recall`**：BM25 检索 + salience 加成；沿 REM 联想边扩散激活带出关联记忆（附 `via` 标注，不计入强化）；支持 `since`/`until` 时间窗与 `timeField: "occurredAt"` 事件范围检索。
-- **呈现即修饰**：默认 `fidelity: "recall"` 返回记忆化呈现（久远记忆是被时间修饰过的印象梗概，附 `drift` 说明）；`raw` 模式取原文；`memory_manage get` 按 ID 追溯完整原文与纠正链。
+- **先摘要再读证据**：默认 `fidelity: "summary"` 返回相关原句和记忆 ID，省略内容时标注 `truncated`；`memory_manage get` 按 ID 读取完整原文、学习证据与纠正链，`recall` 和 `raw` 保留原有呈现方式。
+- **消耗可见**：运行详情分别统计学习、审核、查询扩展和情绪评分的模型实报 Token 与字符估算，自动注入同时受字符预算和 Token 估算预算限制。
 
 ### 睡眠整理（memory_sleep）
 
@@ -233,6 +234,7 @@ sleep-memory/
 | `injectEnabled` | true | 自动注入总开关 |
 | `injectBudget` | 3 | 单次注入条数上限，0 关闭注入 |
 | `injectMaxTotalChars` | 4000 | 整个注入块的字符预算 |
+| `injectMaxEstimatedTokens` | 900 | 整个注入块的 Token 估算预算，与字符预算同时生效 |
 | `injectRepeatAfterTurns` | 3 | 同会话重复注入的轮次间隔，0 关闭 |
 | `autoLearnEnabled` | true | 完成轮次后后台提取有来源的可复用记忆 |
 | `autoLearnMaxItems` | 3 | 每轮最多学习的候选条数 |
@@ -246,6 +248,9 @@ sleep-memory/
 | `semanticRecallEnabled` | false | 语义扩展召回开关 |
 | `salientDecayHalfLifeDays` | 0 | 显著经历专用半衰期，0 关闭 |
 | `salientReviewAfterDays` | 0 | 显著经历复核期限，0 关闭 |
+
+离线标注集区分用户案例与构造用例，输出 `Precision@5`、`Recall@5`、误召回、漏召回、P50/P95 和输出 Token 估算。
+运行 `npm run eval -- --baseline-ref a74d6d9` 可与优化前版本对照，报告默认保存到 `tmp/evaluation-latest.json`；详见[验证指南](docs/guides/reliability.md#评测与消耗统计)。
 
 ---
 

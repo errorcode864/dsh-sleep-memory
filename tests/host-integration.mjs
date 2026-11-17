@@ -54,6 +54,7 @@ function startInstance() {
                             }],
                         }],
                     }) }
+                    yield { type: 'usage', usage: { inputTokens: 80, outputTokens: 20, cacheReadTokens: 10 } }
                     yield { type: 'finish', reason: { kind: 'stop' } }
                 },
             }),
@@ -106,8 +107,11 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 10))
     }
     assert.equal((await first.api.status()).learning.stored, 1)
+    assert.equal((await first.api.status()).metrics.models.learning.reported.totalTokens, 110)
     const learned = await first.call('memory_recall', { query: 'Java', projectId: '测试项目' })
     learnedId = learned.hits[0].id
+    assert.equal(learned.fidelity, 'summary')
+    assert.equal((await first.api.status()).metrics.retrieval.queries, 2)
 } finally {
     await first.close()
 }
@@ -118,6 +122,7 @@ try {
     assert.equal((await second.api.getRecord({ id: correctedId })).lifecycle.state, 'invalid')
     assert.equal((await second.api.status()).schedule.lastSuccessAt, successfulSleepAt)
     assert.equal((await second.api.status()).lastSleep, null)
+    assert.equal((await second.api.status()).metrics.models.learning.calls, 0)
     const learned = await second.api.getRecord({ id: learnedId })
     assert.equal(learned.record.source.kind, 'model')
     assert.equal(learned.record.learning.evidence[0].messageId, 'integration-user')
@@ -134,7 +139,7 @@ try {
     assert.equal(imported.skipped, 3)
     const files = await readdir(resolve(root, 'memory_runtime'))
     assert.ok(files.length > 0)
-    console.log('宿主真实存储集成通过：写入、自主学习、范围绑定、纠正链、失效恢复、持久调度、重载与备份预演。')
+    console.log('宿主真实存储集成通过：摘要召回、Token 计量、自主学习、范围绑定、纠正链、持久调度与备份预演。')
     console.log(`隔离数据保留：${root}`)
 } finally {
     await second.close()

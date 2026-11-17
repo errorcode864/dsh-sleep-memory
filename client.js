@@ -1206,7 +1206,13 @@ window.__ModuleLoader__.load({
                       counterRow('自主学习', `写入 ${state.learning?.stored ?? 0} 条，重复 ${state.learning?.duplicates ?? 0} 条，待复核 ${state.learning?.reviewRequired ?? 0} 条，失败 ${state.learning?.failed ?? 0} 次；${state.learning?.lastReason ?? '尚未运行'}`),
                       counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
                       counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
-                      counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`))))))
+                      counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
+                      ...Object.entries(state.metrics?.models ?? {}).map(([stage, usage]) => counterRow(
+                        { learning: '学习 Token', review: '审核 Token', expansion: '扩展 Token', scoring: '评分 Token' }[stage],
+                        `模型实报 ${usage.reported.totalTokens}（缓存读取 ${usage.reported.cacheReadTokens}）；未实报调用估算 ${usage.estimated.totalTokens}；调用 ${usage.calls} 次，失败 ${usage.failed} 次，累计 ${usage.durationMs} 毫秒`)),
+                      counterRow('注入 Token 估算', `${state.metrics?.injection.estimatedTokens ?? 0}；对应完整正文估算 ${state.metrics?.injection.sourceEstimatedTokens ?? 0}`),
+                      counterRow('按需证据读取', `${state.metrics?.evidence.reads ?? 0} 次，输出估算 ${state.metrics?.evidence.estimatedTokens ?? 0} Token`),
+                      counterRow('显式检索', `${state.metrics?.retrieval.queries ?? 0} 次，空结果 ${state.metrics?.retrieval.empty ?? 0} 次，累计 ${state.metrics?.retrieval.durationMs ?? 0} 毫秒，输出估算 ${state.metrics?.retrieval.estimatedTokens ?? 0} Token`))))))
               : !error ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取运行状态…') : null);
         }
 
@@ -1475,7 +1481,7 @@ window.__ModuleLoader__.load({
         // ---- bundle detail page inline config (plugins.bundle.config) --------
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
-          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
+          'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
@@ -1641,6 +1647,7 @@ window.__ModuleLoader__.load({
           }
           for (const [key, label, hint] of [
             ['injectMaxTotalChars', '注入总字符预算', '包含标题、来源和关联内容，超过预算的条目不注入'],
+            ['injectMaxEstimatedTokens', '注入 Token 估算预算', '与字符预算同时生效，估算不等于模型计费 Token'],
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],

@@ -34,7 +34,8 @@ export function createHarness(config = {}, services = {}) {
         },
         async delete() { throw new Error('可靠性测试禁止执行遗忘删除') },
     }
-    apply({
+    const applyPlugin = services.apply ?? apply
+    applyPlugin({
         storageDomain: {
             open: async (spec) => {
                 if (spec.name === 'memory_runtime') {
