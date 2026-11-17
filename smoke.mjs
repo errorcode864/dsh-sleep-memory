@@ -57,7 +57,7 @@ const effects = []
 const handlers = new Map()
 const ctx = {
   storageDomain: { open: async (spec) => {
-    if (spec.name === 'memory_runtime') {
+    if (spec.name !== 'memory_bank') {
       const runtimeTable = makeTable()
       recordParsers.set(runtimeTable, spec.tables.records.valueSchema)
       return { table: () => runtimeTable, close: async () => {} }
@@ -170,7 +170,7 @@ function makeInstance(config, tableOverride, services = {}) {
   apply({
     storageDomain: {
       open: async (spec) => {
-        if (spec.name === 'memory_runtime') {
+        if (spec.name !== 'memory_bank') {
           const runtimeTable = makeTable()
           recordParsers.set(runtimeTable, spec.tables.records.valueSchema)
           return { table: () => runtimeTable, close: async () => {} }

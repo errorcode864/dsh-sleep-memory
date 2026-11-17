@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { validateRecallTriggers } from './memory-triggers.js'
 
 /** 统一记忆 ID，消息 ID 不使用此约束。 */
 export function createMemoryId() {
@@ -23,7 +24,7 @@ export function getEventRange(record) {
 
 /** 扩展字段均为可选，旧格式不需要读时回写。 */
 export function validateMetadata(value) {
-    const problems = []
+    const problems = validateRecallTriggers(value.recallTriggers)
     if (value.learning !== undefined) {
         const learning = value.learning
         if (!learning || typeof learning !== 'object' || Array.isArray(learning)

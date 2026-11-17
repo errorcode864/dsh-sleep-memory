@@ -3,7 +3,7 @@ import {
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
 
-const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback']
+const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)
@@ -15,7 +15,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         ? feedback.submit(args, trustedFeedback) : { code: 'disabled', message: '反馈记录尚未开启' }
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
-        correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt'],
+        correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt', 'recallTriggers'],
         export: ['action'],
         import: ['action', 'backup', 'dryRun'],
         status: ['action'],
@@ -135,6 +135,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         supersededBy: null, gist: null, rewriteCount: 0, edges: [],
         replaces: record.id, projectId: getProjectId(record),
         source: args.source ?? { kind: 'unknown', confirmed: false },
+        ...(args.recallTriggers !== undefined ? { recallTriggers: args.recallTriggers } : {}),
     }
     parseRecord(corrected)
     await table.put(corrected.id, corrected)

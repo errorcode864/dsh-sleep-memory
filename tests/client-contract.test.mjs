@@ -123,8 +123,8 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 8)
-        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序']) {
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 10)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
         assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
@@ -149,7 +149,49 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         assert.equal(override.recallPlanMode, 'shadow')
         assert.equal(override.learningPolicyMode, 'evidence')
         await assert.rejects(host.api.setConfig({ changes: { recallPlanMode: 'embedding' } }), /recallPlanMode/)
+        await host.api.setConfig({ changes: { sleepAuditEnabled: true, contextualRecallEnabled: true } })
+        assert.equal(override.sleepAuditEnabled, true)
+        assert.equal(override.contextualRecallEnabled, true)
     } finally { client.dispose() }
+})
+
+test('睡眠审计界面使用真实批次预演并确认回滚', async () => {
+    const host = createHarness({ sleepAuditEnabled: true })
+    await host.table.put('smm_a', fixture('smm_a', { strength: 0.4 }))
+    await host.table.put('smm_b', fixture('smm_b', { strength: 0.4 }))
+    const slept = await host.call('memory_sleep', {})
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        let page = await client.render(main)
+        flatten(page).find((node) => node.children.includes('管理')).props.onClick()
+        page = await client.render(main)
+        flatten(page).find((node) => node.type === 'button' && node.children.includes('睡眠审计')).props.onClick()
+        page = await client.render(main)
+        const panel = flatten(page).find((node) => node.type?.name === 'SleepAuditPanel')
+        let tree = await client.render(panel.type, panel.props)
+        flatten(tree).find((node) => node.children.includes('读取睡眠历史')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.includes(slept.auditId)))
+        flatten(tree).find((node) => node.children.includes('查看修改')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.equal(flatten(tree).filter((node) => node.type === 'details').length, 3)
+        flatten(tree).find((node) => node.children.includes('预演回滚')).props.onClick()
+        await flushTasks()
+        assert.notEqual(host.table.get('smm_a').supersededBy, null)
+        tree = await client.render(panel.type, panel.props)
+        flatten(tree).find((node) => node.children.includes('确认回滚')).props.onClick()
+        await flushTasks()
+        assert.equal(host.table.get('smm_a').supersededBy, null)
+        const confirmed = client.calls.find((entry) => entry.method === 'manage' && entry.args[0].dryRun === false)
+        assert.equal(confirmed.args[0].action, 'sleepRollback')
+        assert.ok(confirmed.args[0].planToken)
+    } finally {
+        client.dispose()
+        await host.dispose()
+    }
 })
 
 test('界面有效性管理必须预演后确认，成功后可按状态筛选', async () => {

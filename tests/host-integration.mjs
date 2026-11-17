@@ -14,7 +14,7 @@ const testRoot = resolve(import.meta.dirname, '../tmp')
 await mkdir(testRoot, { recursive: true })
 const root = await mkdtemp(resolve(testRoot, 'host-integration-'))
 
-function startInstance(config = {}) {
+function startInstance(config = {}, failure = {}) {
     const backend = new JsonStorageBackend(root)
     const facility = new DomainFacility({
         storage: { backend: { get: () => backend } },
@@ -30,6 +30,13 @@ function startInstance(config = {}) {
             async open(spec) {
                 const domain = await facility.open(spec)
                 const table = domain.table('records')
+                const put = table.put.bind(table)
+                table.put = async (id, record) => {
+                    if (spec.name === 'memory_bank' && failure.enabled && ++failure.writes === 2) {
+                        throw new Error('真实存储验收模拟睡眠中断')
+                    }
+                    await put(id, record)
+                }
                 // 宿主实例测试绝不进入物理遗忘，避免测试清理误触文件删除。
                 table.delete = async () => { throw new Error('集成验收禁止物理删除') }
                 table.deleteMany = table.delete
@@ -61,7 +68,8 @@ function startInstance(config = {}) {
         },
     }, {
         sleepIntervalMinutes: 60, sleepOnStart: false, salientScoringEnabled: false, dreamMaxCandidates: 0,
-        learningPolicyMode: 'evidence', feedbackEnabled: true, recallPlanMode: 'local', ...config,
+        learningPolicyMode: 'evidence', feedbackEnabled: true, recallPlanMode: 'local',
+        sleepAuditEnabled: true, contextualRecallEnabled: true, ...config,
     })
     return {
         api, handlers,
@@ -82,6 +90,7 @@ let correctedId
 let successfulSleepAt
 let learnedId
 let exposureId
+let auditId
 try {
     await first.api.manage({ action: 'bind', sessionId, projectId: '测试项目' })
     const write = await first.call('memory_write', { content: '部署端口 8600', kind: 'fact' }, execution)
@@ -92,7 +101,7 @@ try {
     const plan = await first.api.manage(request)
     await first.api.manage({ ...request, dryRun: false, planToken: plan.planToken })
     assert.equal((await first.call('memory_recall', { query: '部署' }, execution)).count, 0)
-    await first.call('memory_sleep', {})
+    auditId = (await first.call('memory_sleep', {})).auditId
     successfulSleepAt = (await first.api.status()).schedule.lastSuccessAt
     assert.ok(successfulSleepAt)
     const emit = (type, data) => first.handlers.get('session/event')({ id: sessionId }, { type, data })
@@ -167,8 +176,47 @@ try {
     assert.ok(files.length > 0)
     assert.ok((await readdir(resolve(root, 'memory_feedback'))).length > 0)
     assert.ok((await readdir(resolve(root, 'memory_learning_jobs'))).length > 0)
+    assert.equal((await second.api.manage({ action: 'sleepHistory', batchId: auditId })).items[0].state, 'applied')
+    const contextual = await second.call('memory_write', {
+        kind: 'experience', content: '旧语法造成兼容问题，需要先核对目标产品。',
+        recallTriggers: [{ when: '准备迁移数据时', cues: ['数据搬家'] }],
+    }, execution)
+    assert.equal((await second.call('memory_recall', { query: '数据搬家' }, execution)).hits[0].id, contextual.id)
+    assert.ok((await readdir(resolve(root, 'memory_sleep_audit'))).length > 0)
     console.log('宿主真实存储集成通过：本地规划、学习持久去重、反馈重载、摘要、计量、范围、纠正链与备份预演。')
+    console.log('新增验收通过：睡眠审计跨实例重载和情境触发召回。')
     console.log(`隔离数据保留：${root}`)
 } finally {
     await second.close()
+}
+
+const failure = { enabled: false, writes: 0 }
+const interrupted = startInstance({}, failure)
+const beforeInterrupted = (await interrupted.api.manage({ action: 'export' })).backup.records
+let interruptedId
+try {
+    failure.enabled = true
+    await assert.rejects(interrupted.call('memory_sleep', {}), /模拟睡眠中断/)
+    interruptedId = (await interrupted.api.manage({ action: 'sleepHistory' })).items.find((batch) => batch.state === 'prepared').id
+} finally {
+    await interrupted.close()
+}
+const recovered = startInstance({ sleepAuditEnabled: false })
+try {
+    await recovered.api.stats()
+    assert.equal((await recovered.api.manage({ action: 'sleepHistory', batchId: interruptedId })).items[0].state, 'applied')
+    const request = { action: 'sleepRollback', batchId: interruptedId }
+    const plan = await recovered.api.manage(request)
+    assert.equal(plan.dryRun, true)
+    await recovered.api.manage({ ...request, dryRun: false, planToken: plan.planToken })
+} finally {
+    await recovered.close()
+}
+const restored = startInstance()
+try {
+    assert.deepEqual((await restored.api.manage({ action: 'export' })).backup.records, beforeInterrupted)
+    assert.equal((await restored.api.manage({ action: 'sleepHistory', batchId: interruptedId })).items[0].state, 'rolled-back')
+    console.log('新增故障验收通过：真实磁盘中断、关闭开关后恢复、回滚落盘与再次重载。')
+} finally {
+    await restored.close()
 }

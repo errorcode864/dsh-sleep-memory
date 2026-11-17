@@ -31,6 +31,8 @@
     "memory-intelligence.js",
     "memory-learning-jobs.js",
     "memory-feedback.js",
+    "memory-sleep-audit.js",
+    "memory-triggers.js",
     "memory-retrieval.js",
     "memory-search-index.js",
     "memory-query-plan.js",

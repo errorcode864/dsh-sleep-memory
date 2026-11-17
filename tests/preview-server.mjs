@@ -16,7 +16,10 @@ if (!hostSource.includes(bootMarker) || !hostSource.includes('function mW()')) {
 const hostModules = `${hostSource.slice(0, hostSource.indexOf(bootMarker))}\nglobalThis.previewModules=Object.fromEntries(mW().filter(module=>['react','react-dom/client'].includes(module.id)).map(module=>[module.id,module.factory()]));`
 let override = {}
 const row = { options: { id: 'sleep-memory' } }
-const previewConfig = { feedbackEnabled: true, recallPlanMode: 'local', autoLearnEnabled: false, recallReviewEnabled: false }
+const previewConfig = {
+    feedbackEnabled: true, recallPlanMode: 'local', autoLearnEnabled: false, recallReviewEnabled: false,
+    sleepAuditEnabled: true, contextualRecallEnabled: true,
+}
 const harness = createHarness(previewConfig, { get: (key) => key === 'configEditor' ? {
     entries: () => [row],
     configuration: () => [{ entry: row, inherited: previewConfig, override }],

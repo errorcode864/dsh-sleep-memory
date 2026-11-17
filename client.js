@@ -1050,6 +1050,71 @@ window.__ModuleLoader__.load({
                 message ? h('p', { role: 'status' }, message) : null);
         }
 
+        /** 睡眠历史按批次预演回滚并保留修改证据。 */
+        function SleepAuditPanel({ onChanged }) {
+            const [history, setHistory] = useState(null);
+            const [detail, setDetail] = useState(null);
+            const [plan, setPlan] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const run = async (input) => {
+                setBusy(true); setMessage(''); setPlan(null);
+                try {
+                    const result = await call('manage', input);
+                    if (input.action === 'sleepHistory') {
+                        if (input.batchId) setDetail(result);
+                        if (!input.batchId) { setHistory(result); setDetail(null); }
+                        return;
+                    }
+                    if (input.action === 'sleepRollback' && result.dryRun) {
+                        setPlan(result);
+                        return;
+                    }
+                    setMessage(input.action === 'sleepRecover' ? `恢复完成：${result.recovered} 个批次。` : '回滚完成，新概要已停用。');
+                    setDetail(null);
+                    setHistory(await call('manage', { action: 'sleepHistory', limit: 10 }));
+                    onChanged?.();
+                } catch (error) {
+                    setMessage(`操作失败：${error.message}`);
+                } finally { setBusy(false); }
+            };
+            return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '睡眠审计' },
+                h('h3', null, '睡眠审计'),
+                h('p', null, '开启睡眠审计后保留每批修改证据并暂停物理遗忘；回滚需先预演，后续修改会阻止覆盖。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepHistory', limit: 10 }) }, '读取睡眠历史'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepRecover' }) }, '恢复中断批次'),
+                history ? h('div', null,
+                    h('p', null, `共 ${history.total} 个批次`),
+                    history.items.map((batch) => h('div', { key: batch.id },
+                        h('p', null, `${formatRuntimeTime(batch.createdAt)} · ${{ prepared: '待恢复', applied: '已完成', 'rolling-back': '回滚待恢复', 'rolled-back': '已回滚' }[batch.state]} · 修改 ${batch.changedCount} 条`),
+                        h('code', null, batch.id),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void run({ action: 'sleepHistory', batchId: batch.id, limit: 5 }) }, '查看修改'),
+                        batch.state === 'applied' ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                            onClick: () => void run({ action: 'sleepRollback', batchId: batch.id }) }, '预演回滚') : null)),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || history.offset === 0,
+                        onClick: () => void run({ action: 'sleepHistory', offset: Math.max(0, history.offset - 10), limit: 10 }) }, '上一页'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || history.offset + history.limit >= history.total,
+                        onClick: () => void run({ action: 'sleepHistory', offset: history.offset + 10, limit: 10 }) }, '下一页')) : null,
+                detail?.items[0] ? h('div', null,
+                    h('p', null, `批次修改 ${detail.offset + 1} 起，共 ${detail.items[0].totalChanges} 条`),
+                    detail.items[0].changes.map((change) => h('details', { key: change.id },
+                        h('summary', null, change.id),
+                        h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+                            JSON.stringify({ before: change.before, after: change.after }, null, 2)))),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || detail.offset === 0,
+                        onClick: () => void run({ action: 'sleepHistory', batchId: detail.items[0].id, offset: Math.max(0, detail.offset - 5), limit: 5 }) }, '上一组修改'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || detail.offset + detail.limit >= detail.items[0].totalChanges,
+                        onClick: () => void run({ action: 'sleepHistory', batchId: detail.items[0].id, offset: detail.offset + 5, limit: 5 }) }, '下一组修改')) : null,
+                plan ? h('div', { role: 'status' },
+                    h('p', null, `将恢复 ${plan.restoredCount} 条原记录，停用 ${plan.invalidatedCount} 条新概要。`),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-primary', disabled: busy,
+                        onClick: () => void run({ action: 'sleepRollback', batchId: plan.batchId, dryRun: false, planToken: plan.planToken }) }, '确认回滚')) : null,
+                message ? h('p', { role: 'status' }, message) : null);
+        }
+
         /** Overview card: totals, per-layer counts, superseded, edges, time span. */
         function StatsCard({ stats, onRefresh }) {
           const spanText = stats === null ? ''
@@ -1507,13 +1572,15 @@ window.__ModuleLoader__.load({
 
               h(MemoryDialog, { id: 'sm-manager', title: '记忆管理', open: managementView !== null, onClose: () => setManagementView(null) },
                 h('div', { className: 'sm-manager-tabs', role: 'group', 'aria-label': '记忆管理分类' },
-                  [['status', '运行详情'], ['scope', '会话范围'], ['backup', '备份恢复']].map(([key, label]) =>
+                  [['status', '运行详情'], ['scope', '会话范围'], ['backup', '备份恢复'], ['audit', '睡眠审计']].map(([key, label]) =>
                     h('button', { key, type: 'button', className: 'sm-btn sm-btn-quiet', 'aria-pressed': managementView === key,
                       'aria-controls': `sm-manager-${key}`, onClick: () => setManagementView(key) }, label))),
                 h('div', { id: 'sm-manager-status', hidden: managementView !== 'status' }, h(RuntimeStatus, { ...runtime, sleeping })),
                 h('div', { id: 'sm-manager-scope', hidden: managementView !== 'scope' }, h(ScopePanel)),
                 h('div', { id: 'sm-manager-backup', hidden: managementView !== 'backup' },
-                  h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } }))),
+                  h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } })),
+                managementView === 'audit' ? h('div', { id: 'sm-manager-audit' },
+                  h(SleepAuditPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } })) : null),
               h(Toast, { toast })));
         }
 
@@ -1522,6 +1589,7 @@ window.__ModuleLoader__.load({
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled',
+          'sleepAuditEnabled', 'contextualRecallEnabled',
           'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
@@ -1648,6 +1716,8 @@ window.__ModuleLoader__.load({
             ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],
             ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
+            ['sleepAuditEnabled', '睡眠审计与回滚', '保留批次修改证据并暂停物理遗忘；可在记忆管理中预演回滚'],
+            ['contextualRecallEnabled', '情境触发召回', '使用记忆中的具体情境短语补充候选；仍经过相关性审核与预算检查'],
           ]) {
             if (!fields[key]) continue;
             rows.push(h('label', { className: 'sm-config-row', key },

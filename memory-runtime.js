@@ -108,6 +108,7 @@ export function memoryVersion(record, lifecycle) {
         id: record.id, content: record.content, gist: record.gist,
         projectId: record.projectId ?? null, source: record.source, lifecycle,
         replaces: record.replaces, layer: record.layer,
+        recallTriggers: record.recallTriggers,
     })
 }
 

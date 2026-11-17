@@ -26,6 +26,7 @@ source_of_truth: code-and-decision
   - [本地检索与学习闭环](decisions/memory-local-learning.md)（decision，active，更新于 2026-11-17）
   - [混合检索、学习反馈与分阶段启用设计](decisions/memory-hybrid-learning.md)（decision，deprecated，更新于 2026-11-17）
   - [第 5–7 阶段实施清单](decisions/memory-phase-5-7-plan.md)（decision，active，更新于 2026-11-17）
+  - [睡眠审计与情境触发](decisions/memory-contextual-audit.md)（decision，active，更新于 2026-11-17）
 
 ### 指南与运维
 

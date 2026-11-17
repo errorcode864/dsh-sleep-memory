@@ -33,6 +33,8 @@ import { createLocalSearchIndex } from './memory-search-index.js'
 import { planLocalRecall } from './memory-query-plan.js'
 import { learningJobsDomainSpec } from './memory-learning-jobs.js'
 import { createFeedbackStore, feedbackDomainSpec } from './memory-feedback.js'
+import { createSleepAudit, sleepAuditDomainSpec } from './memory-sleep-audit.js'
+import { matchRecallTriggers, RECALL_TRIGGERS_SCHEMA } from './memory-triggers.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
   initialSchedule, failedSchedule, nextSleepTime, memoryVersion, createInjectionTracker,
@@ -67,6 +69,7 @@ const MEMORY_INPUT_FIELDS = {
     required: ['kind'], additionalProperties: false,
   },
   occurredAt: { type: 'integer', description: '事件发生的毫秒时间戳（非负），缺省为写入时刻' },
+  recallTriggers: RECALL_TRIGGERS_SCHEMA,
 }
 
 /**
@@ -146,6 +149,8 @@ function resolveConfig(raw) {
   numberField('dreamEdgesPerRecord', 'integer', 0, 10, 2)
   numberField('dreamMaxCandidates', 'integer', 0, 5_000, 300)
   numberField('deepSummaryMaxChars', 'integer', 200, 8_000, 1_200)
+  booleanField('sleepAuditEnabled', false)
+  booleanField('contextualRecallEnabled', false)
 
   // ---- 扩散激活召回（M3）----------------------------------------------------
   numberField('spreadDepth', 'integer', 0, 3, 1) // 0 = 关闭扩散，仅直接命中
@@ -521,7 +526,7 @@ function validateWriteArgs(args, config) {
     }
   }
   const unknownKeys = Object.keys(args).filter(
-    (key) => !['content', 'kind', 'layer', 'tags', 'keywords', 'importance', 'valence', 'arousal', 'projectId', 'source', 'occurredAt'].includes(key),
+    (key) => !['content', 'kind', 'layer', 'tags', 'keywords', 'importance', 'valence', 'arousal', 'projectId', 'source', 'occurredAt', 'recallTriggers'].includes(key),
   )
   problems.push(...validateMetadata(args))
   if (unknownKeys.length > 0) problems.push(`unknown arguments: ${unknownKeys.join(', ')}`)
@@ -805,7 +810,7 @@ async function deleteMemoryRecords(table, ids) {
  * 决策基于调用开始时的表快照；调用方在同实例写队列内执行，避免并发覆盖。
  * @param {MemoryTable} table records 表句柄
  * @param {MemoryConfig} cfg
- * @param {{now?: number, dryRun?: boolean}} [options]
+ * @param {{now?: number, dryRun?: boolean, audit?: ReturnType<typeof createSleepAudit> | null}} [options]
  * @returns {Promise<SleepReport>}
  */
 async function runSleepCycle(table, cfg, options = {}) {
@@ -848,7 +853,7 @@ async function runSleepCycle(table, cfg, options = {}) {
   for (const [id, rec] of live) {
     const idleDays = Math.round(((now - rec.lastAccessAt) / 86_400_000) * 10) / 10
     // 替代链的末端仍代表纠正结果，不能自动遗忘后让旧事实重新生效。
-    if (rec.layer === 'archive' && !rec.replaces && strengthOf(id, rec) <= cfg.archiveStrengthFloor
+    if (!options.audit && rec.layer === 'archive' && !rec.replaces && strengthOf(id, rec) <= cfg.archiveStrengthFloor
       && idleDays > cfg.deleteArchiveAfterDays) {
       doomedIds.push(id)
       deletedList.push({ id, contentPreview: rec.content.slice(0, REPORT_PREVIEW_CHARS), idleDays })
@@ -882,8 +887,12 @@ async function runSleepCycle(table, cfg, options = {}) {
       capacityLimited = true
       continue
     }
-    availableSlots -= 1
     const members = cluster.map((entry) => entry.rec)
+    const recallTriggers = [...new Map(members.flatMap((member) => member.recallTriggers ?? [])
+      .map((trigger) => [JSON.stringify(trigger), trigger])).values()]
+    // 触发入口不能随概要截断丢失。
+    if (recallTriggers.length > 4) continue
+    availableSlots -= 1
     const hasExperience = members.some((member) => member.kind === 'experience')
     const deepId = createMemoryId()
     const maxStrength = Math.max(...cluster.map((entry) => strengthOf(entry.id, entry.rec)))
@@ -912,6 +921,7 @@ async function runSleepCycle(table, cfg, options = {}) {
       edges: cluster.map((entry) => ({ target: entry.id, relation: 'consolidates', weight: 1 })),
       supersededBy: null,
       gist: null,
+      ...(recallTriggers.length ? { recallTriggers } : {}),
     }
     newDeepIds.push(deepId)
     finalOverwrite.set(deepId, deepRecord)
@@ -955,6 +965,7 @@ async function runSleepCycle(table, cfg, options = {}) {
     archived: archivedList.slice(0, REPORT_ITEM_LIMIT), archivedCount: archivedList.length,
     deleted: deletedList.slice(0, REPORT_ITEM_LIMIT), deletedCount: deletedList.length,
     edgesAdded: 0, capacityLimited, reviewCount: reviewRoots.size,
+    ...(options.audit ? { forgettingPaused: true } : {}),
   }
   /** @type {Map<string, {to: string, weight: number}[]>} */
   const newEdges = new Map()
@@ -1023,6 +1034,14 @@ async function runSleepCycle(table, cfg, options = {}) {
 
   // ---- 写回（dryRun 只报不写）----
   if (!dryRun) {
+    if (options.audit) {
+      report.auditId = await options.audit.commit([...finalOverwrite].map(([id, after]) => ({
+        id, before: view.byId.get(id) ?? null, after,
+      })), report)
+      report.forgettingPaused = true
+      report.durationMs = Date.now() - startedAt
+      return report
+    }
     const createdIds = new Set(newDeepIds)
     for (const [id, record] of finalOverwrite) {
       // 新生成的 deep 记忆尚不存在，必须先 put；已有记录仍走 update，保留缺失记录保护。
@@ -1089,6 +1108,8 @@ async function runRecallCore(table, query, scope) {
         score += cfg.semanticRecallWeight * expansions[i].score
       }
       if (aliasScores[i]?.score > 0) score += 0.5 * aliasScores[i].score
+      const triggers = cfg.contextualRecallEnabled ? matchRecallTriggers(rec, query) : []
+      if (triggers.length) score = Math.max(score, 1)
       if (rec.layer === 'salient' && rec.arousal !== null) {
         score *= 1 + cfg.salienceRecallBoost * rec.arousal
       }
@@ -1101,6 +1122,7 @@ async function runRecallCore(table, query, scope) {
         ...direct.evidence, ...(expansions[i]?.score > 0 ? { expanded: expansions[i].evidence } : {}),
         ...(aliasScores[i]?.score > 0 ? { aliases: aliasScores[i].phrases } : {}),
       }
+      if (triggers.length) retrieval.triggers = triggers
       return { id, rec, score, thresholdScore, retrieval }
     })
     .filter((hit) => (hit.score > 0 || query.trim() === '') && hit.thresholdScore >= (scope.minScore ?? 0))
@@ -1183,7 +1205,8 @@ function memoryLine(rec, cfg, query) {
  */
 function recallBlockText(core, cfg, query) {
   const lines = [
-    ...core.ranked.map((hit) => `- ${memoryLine(hit.rec, cfg, query)}`),
+    ...core.ranked.map((hit) => `- ${memoryLine(hit.rec, cfg, query)}${hit.retrieval?.triggers?.length
+      ? `（情境线索：${hit.retrieval.triggers.map((trigger) => trigger.when).join('；')}）` : ''}`),
     ...core.associated.map((found) => `- ${memoryLine(found.rec, cfg, query)}（由联想边带出）`),
   ]
   return [
@@ -1286,6 +1309,8 @@ const GUI_CONFIG_FIELDS = [
   { key: 'injectEnabled', type: 'boolean' },
   { key: 'salientScoringEnabled', type: 'boolean' },
   { key: 'sleepOnStart', type: 'boolean' },
+  { key: 'sleepAuditEnabled', type: 'boolean' },
+  { key: 'contextualRecallEnabled', type: 'boolean' },
   { key: 'projectId', type: 'string' },
   { key: 'injectMaxTotalChars', type: 'integer', min: 300, max: 32000 },
   { key: 'injectMaxEstimatedTokens', type: 'integer', min: 100, max: 16000 },
@@ -1501,7 +1526,7 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback'].includes(input.action)) {
+    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1509,6 +1534,9 @@ class SleepMemoryApiService {
     }
     const result = await this.capabilities.manage(input)
     if (result.code) throw apiFail(result.code, result.message)
+    if (input.action === 'sleepHistory' && Buffer.byteLength(JSON.stringify(result), 'utf8') > 10 * 1024 * 1024) {
+      throw apiFail('audit-too-large', '审计详情超过界面 10 MiB 限制，请使用管理工具读取')
+    }
     if (input.action === 'export' && Buffer.byteLength(JSON.stringify(result.backup), 'utf8') > 10 * 1024 * 1024) {
       throw apiFail('backup-too-large', '备份超过界面 10 MiB 限制，请使用管理工具导出')
     }
@@ -1643,6 +1671,7 @@ export function apply(ctx, config) {
       autoLearnEnabled: cfg.autoLearnEnabled, recallReviewEnabled: cfg.recallReviewEnabled,
       recallPlanMode: cfg.recallPlanMode, learningPolicyMode: cfg.learningPolicyMode,
       feedbackEnabled: cfg.feedbackEnabled, feedbackRankingEnabled: cfg.feedbackRankingEnabled,
+      sleepAuditEnabled: cfg.sleepAuditEnabled, contextualRecallEnabled: cfg.contextualRecallEnabled,
     })
   }
   // 同一插件实例内串行读改写，防止睡眠快照覆盖已提交的召回强化或事实纠正。
@@ -1680,6 +1709,11 @@ export function apply(ctx, config) {
   const learningDomainPromise = cfg.autoLearnEnabled && cfg.learningPolicyMode === 'evidence'
     ? ctx.storageDomain.open(learningJobsDomainSpec(parseStoredRecord)) : null
   const feedbackDomainPromise = cfg.feedbackEnabled ? ctx.storageDomain.open(feedbackDomainSpec) : null
+  const auditDomainPromise = ctx.storageDomain.open(sleepAuditDomainSpec(parseStoredRecord))
+  const audit = createSleepAudit(
+    () => domainPromise.then((domain) => domain.table('records')),
+    () => auditDomainPromise.then((domain) => domain.table('records')),
+  )
   const feedback = feedbackDomainPromise
     ? createFeedbackStore(() => feedbackDomainPromise.then((domain) => domain.table('records'))) : null
   if (feedback) runtime.feedback = feedback.state
@@ -1687,18 +1721,23 @@ export function apply(ctx, config) {
   runtimeDomainPromise.catch(() => {})
   learningDomainPromise?.catch(() => {})
   feedbackDomainPromise?.catch(() => {})
+  auditDomainPromise.catch(() => {})
   ctx.effect(() => async () => {
     disposed = true
     clearTimeout(scheduleTimer)
     for (const controller of controllers) controller.abort()
     await intelligence.drain()
     await mutations
-    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise].filter(Boolean))
+    await audit.drain()
+    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise, auditDomainPromise].filter(Boolean))
     for (const domain of domains) if (domain.status === 'fulfilled') await domain.value.close()
   })
 
   // storage-domain 的 Domain 接口没有 tables 属性；表句柄须经 domain.table(name) 获取。
-  const records = () => domainPromise.then((domain) => domain.table('records'))
+  const records = async () => {
+    await audit.recover()
+    return domainPromise.then((domain) => domain.table('records'))
+  }
   const runtimeRecords = () => runtimeDomainPromise.then((domain) => domain.table('records'))
   const workspaceScopes = () => {
     try { return listWorkspaceScopes(ctx) }
@@ -1747,11 +1786,14 @@ export function apply(ctx, config) {
         .filter((record) => record.kind === 'binding' && !record.released).slice(0, 500),
     }
   }
-  const manageExtended = async (args, execution, trustedFeedback = false) => executeMemoryManagement(args, {
-    table: await records(), cfg, parseRecord: parseStoredRecord, status,
-    manageScope: (input) => manageScope(input, getSessionId(execution)),
-    feedback, trustedFeedback,
-  })
+  const manageExtended = async (args, execution, trustedFeedback = false) => {
+    if (['sleepHistory', 'sleepRollback', 'sleepRecover'].includes(args.action)) return audit.manage(args)
+    return executeMemoryManagement(args, {
+      table: await records(), cfg, parseRecord: parseStoredRecord, status,
+      manageScope: (input) => manageScope(input, getSessionId(execution)),
+      feedback, trustedFeedback,
+    })
+  }
   const scheduleReady = runtimeRecords().then((table) => {
     scheduleState = table.get('schedule') ?? initialSchedule()
     scheduleLoaded = true
@@ -2010,6 +2052,7 @@ export function apply(ctx, config) {
     list: '列表', forget: '遗忘', stats: '概况', get: '原文追溯', correct: '事实纠正',
     export: '备份导出', import: '备份导入', status: '运行状态',
     setState: '有效性管理', scope: '会话范围', bind: '项目绑定',
+    sleepHistory: '睡眠历史', sleepRollback: '睡眠回滚', sleepRecover: '中断恢复',
   }
 
   /**
@@ -2029,6 +2072,9 @@ export function apply(ctx, config) {
         setState: `${value.dryRun ? '预演' : '已更新'}：整链 ${value.chainIds?.length ?? 0} 条，目标状态 ${value.state}`,
         scope: `范围 ${value.scope?.projectId ?? '全局'}，来源 ${value.scope?.source}`,
         bind: `会话绑定已更新，当前范围 ${value.scope?.projectId ?? '全局'}`,
+        sleepHistory: `睡眠批次 ${value.total ?? 0} 个`,
+        sleepRecover: `已恢复 ${value.recovered ?? 0} 个睡眠批次`,
+        sleepRollback: `${value.dryRun ? '预演' : '恢复完成'}：${value.batchId}`,
       }
       return { v: CARD_META_VERSION, tool: 'memory_manage', ok: true, action: value.action, summary: summaries[value.action] }
     }
@@ -2133,6 +2179,7 @@ export function apply(ctx, config) {
       '且至少一项达到显著阈值（|valence| ≥ 0.6 或 arousal ≥ 0.7），否则会被拒绝并提示改用 surface。',
       'tags 建议给 2~5 个主题词，keywords 给检索关键词。projectId 缺省采用会话/工作区/配置范围，null 显式指定全局；',
       '纠正已有事实请使用 memory_manage correct，保留历史原文；经历应写清情境、行动、结果和适用条件。',
+      'recallTriggers 可描述何时需要想起；when 写明条件，cues 填用户可能使用的具体短语。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -2226,6 +2273,7 @@ export function apply(ctx, config) {
         edges: [],
         supersededBy: null,
         gist: null,
+        ...(args.recallTriggers !== undefined ? { recallTriggers: args.recallTriggers } : {}),
       }
       await table.put(id, record)
       /** @type {Record<string, unknown>} */
@@ -2483,7 +2531,7 @@ export function apply(ctx, config) {
             scheduleState = { ...scheduleState, lastAttemptAt: now, retryAt: now + 60_000, lastError: '上次睡眠尚未确认完成' }
             await stateTable.put('schedule', scheduleState)
           }
-          const report = await runSleepCycle(await records(), cfg, { dryRun })
+          const report = await runSleepCycle(await records(), cfg, { dryRun, audit: cfg.sleepAuditEnabled ? audit : null })
           if (!dryRun) {
             const nextState = {
               ...scheduleState, lastSuccessAt: Date.now(), failures: 0, retryAt: null, lastError: null,
@@ -2581,32 +2629,35 @@ export function apply(ctx, config) {
       'status=持久睡眠调度与本次加载的评分、查询扩展、注入计数；此工具是个人 profile 管理接口。',
       'setState=整条纠正链切换 active/review/invalid，需 reason，默认预演；确认时传 dryRun:false 与 planToken。',
       'scope=读取当前会话解析范围；bind=绑定会话项目，null 表示全局，release:true 释放绑定。',
+      'sleepHistory=分页读取睡眠审计，batchId 可展开修改；sleepRecover=恢复中断批次。',
+      'sleepRollback=预演回滚，确认时传 dryRun:false 与 planToken；后续记忆已改变则拒绝覆盖。',
     ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind'], description: '记忆管理操作' },
+        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback'], description: '记忆管理操作' },
         layer: { type: 'string', enum: LAYERS, description: 'list 专用：限定记忆层（surface/deep/archive/salient）' },
         tag: { type: 'string', description: 'list 专用：限定标签，只列含该标签的记忆' },
-        offset: { type: 'integer', description: 'list 专用：分页偏移量，默认 0' },
-        limit: { type: 'integer', description: 'list 专用：本页返回条数（1~500），默认取配置值' },
+        offset: { type: 'integer', description: 'list/get/sleepHistory 分页偏移量，默认 0' },
+        limit: { type: 'integer', description: '本页返回条数；sleepHistory 为 1~100 且默认 20，list 最多 500' },
         id: { type: 'string', description: 'forget 专用：要删除的记忆 id（可先用 list 查到）' },
         cascade: { type: 'boolean', description: 'forget 专用：是否级联删除被本条 superseded 的记录，默认 true' },
         ...MEMORY_INPUT_FIELDS,
         content: { type: 'string', description: 'correct 专用：完整的新事实' },
         backup: { type: 'object', description: 'import 专用：export 返回的完整 backup 对象' },
-        dryRun: { type: 'boolean', description: 'import 专用：默认 true，只校验预演' },
+        dryRun: { type: 'boolean', description: 'import/setState/sleepRollback 默认 true，只校验预演' },
         state: { type: 'string', enum: ['active', 'review', 'invalid'], description: 'setState 专用：有效、待复核、已失效' },
         reason: { type: 'string', description: 'setState 专用：状态变更原因' },
-        planToken: { type: 'string', description: 'setState 专用：预演返回的确认凭据' },
+        planToken: { type: 'string', description: 'setState/sleepRollback 预演返回的确认凭据' },
         sessionId: { type: 'string', description: 'scope/bind 专用：缺省采用当前工具执行会话' },
         release: { type: 'boolean', description: 'bind 专用：true 释放显式绑定，回退工作区或配置' },
+        batchId: { type: 'string', description: '睡眠审计批次 ID' },
       },
       required: ['action'],
     },
     output: {
       schema: { oneOf: [MANAGE_LIST_OK_SCHEMA, MANAGE_FORGET_OK_SCHEMA, MANAGE_STATS_OK_SCHEMA,
-        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind'] } }, required: ['action'] },
+        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback'] } }, required: ['action'] },
         ERROR_SCHEMA] },
       render(_args, value) {
         return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
@@ -2623,7 +2674,7 @@ export function apply(ctx, config) {
       return {
         card: 'generic',
         title: label === undefined ? '记忆管理' : `记忆管理 · ${label}`,
-        kind: ['forget', 'correct', 'import'].includes(action) ? 'other' : 'read',
+        kind: ['forget', 'correct', 'import', 'sleepRecover', 'sleepRollback'].includes(action) ? 'other' : 'read',
       }
     },
     presentResult: manageCardResult,
@@ -2633,6 +2684,7 @@ export function apply(ctx, config) {
       if (problems.length > 0) {
         return { code: 'invalid_args', message: `memory_manage 参数被拒绝：${problems.join('；')}` }
       }
+      if (args.action === 'forget' && cfg.sleepAuditEnabled) return { code: 'audit_retention', message: '审计模式保留修改证据，当前不提供物理遗忘' }
       const table = await records()
       if (args.action === 'list') {
         const filtered = [...table.entries()]
