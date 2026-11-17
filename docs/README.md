@@ -22,7 +22,10 @@ source_of_truth: code-and-decision
 ### 技术决策
 
 - [进入技术决策领域索引](decisions/README.md)
-  - [记忆可靠性与产品完善计划](decisions/memory-reliability.md)（decision，active，更新于 2026-11-09）
+  - [记忆可靠性与产品完善计划](decisions/memory-reliability.md)（decision，active，更新于 2026-11-17）
+  - [本地检索与学习闭环](decisions/memory-local-learning.md)（decision，active，更新于 2026-11-17）
+  - [混合检索、学习反馈与分阶段启用设计](decisions/memory-hybrid-learning.md)（decision，deprecated，更新于 2026-11-17）
+  - [第 5–7 阶段实施清单](decisions/memory-phase-5-7-plan.md)（decision，active，更新于 2026-11-17）
 
 ### 指南与运维
 

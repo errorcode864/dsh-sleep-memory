@@ -6,6 +6,7 @@ export function createHarness(config = {}, services = {}) {
     let parser
     const data = services.data ?? new Map()
     const runtimeData = services.runtimeData ?? new Map()
+    const domains = services.domains ?? new Map()
     const tools = new Map()
     const handlers = new Map()
     const provided = new Map()
@@ -38,17 +39,20 @@ export function createHarness(config = {}, services = {}) {
     applyPlugin({
         storageDomain: {
             open: async (spec) => {
-                if (spec.name === 'memory_runtime') {
+                if (spec.name !== 'memory_bank') {
+                    const domainData = spec.name === 'memory_runtime' ? runtimeData : domains.get(spec.name) ?? new Map()
+                    domains.set(spec.name, domainData)
                     const runtimeTable = {
-                        get: (id) => structuredClone(runtimeData.get(id)),
-                        entries: () => structuredClone([...runtimeData.entries()])[Symbol.iterator](),
+                        get: (id) => structuredClone(domainData.get(id)),
+                        entries: () => structuredClone([...domainData.entries()])[Symbol.iterator](),
                         async put(id, value) {
                             spec.tables.records.valueSchema.parse(value)
-                            await services.beforeRuntimePut?.(id, value)
-                            runtimeData.set(id, structuredClone(value))
+                            await services.beforeDomainPut?.(spec.name, id, value)
+                            if (spec.name === 'memory_runtime') await services.beforeRuntimePut?.(id, value)
+                            domainData.set(id, structuredClone(value))
                         },
                     }
-                    for (const value of runtimeData.values()) spec.tables.records.valueSchema.parse(value)
+                    for (const value of domainData.values()) spec.tables.records.valueSchema.parse(value)
                     return { table: () => runtimeTable, close: async () => {} }
                 }
                 parser = spec.tables.records.valueSchema
@@ -67,7 +71,7 @@ export function createHarness(config = {}, services = {}) {
         autoLearnEnabled: false, recallReviewEnabled: false, ...config,
     })
     return {
-        table, data, runtimeData, tools, handlers, writes, api: provided.get('sleepMemoryApi'),
+        table, data, runtimeData, domains, tools, handlers, writes, api: provided.get('sleepMemoryApi'),
         call: (name, args, execution) => tools.get(name).execute(args, execution),
         async reloadRecords() {
             const stored = JSON.parse(JSON.stringify([...data.values()]))

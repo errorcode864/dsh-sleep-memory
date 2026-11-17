@@ -3,14 +3,16 @@ import {
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
 
-const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind']
+const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)
 }
 
 /** 扩展管理请求独立校验，沿用既有工具的错误返回协议。 */
-export async function executeMemoryManagement(args, { table, cfg, parseRecord, status, manageScope }) {
+export async function executeMemoryManagement(args, { table, cfg, parseRecord, status, manageScope, feedback, trustedFeedback }) {
+    if (args.action === 'feedback') return feedback
+        ? feedback.submit(args, trustedFeedback) : { code: 'disabled', message: '反馈记录尚未开启' }
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
         correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt'],
@@ -71,6 +73,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         const ids = record.edges.filter((edge) => edge.relation === 'consolidates').map((edge) => edge.target)
         return {
             action: 'get', record, current: view.isCurrent(record), replacedBy: view.replacedBy.get(record.id) ?? null,
+            ...(feedback ? await feedback.detail(record, view.lifecycleOf(record), view.isCurrent(record)) : {}),
             sources: ids.slice(offset, offset + limit).map((id) => table.get(id)).filter(Boolean),
             totalSources: ids.length, offset, limit,
             lifecycle: view.lifecycleOf(record), chainRoot: root.id,

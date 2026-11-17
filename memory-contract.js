@@ -34,7 +34,7 @@ export function validateMetadata(value) {
             || !Array.isArray(learning.evidence) || learning.evidence.length < 1 || learning.evidence.length > 3
             || learning.evidence.some((evidence) => !evidence || typeof evidence.messageId !== 'string'
                 || !evidence.messageId || evidence.messageId.length > 200 || typeof evidence.quote !== 'string'
-                || evidence.quote.trim().length < 8 || evidence.quote.length > 500)) {
+                || evidence.quote.trim().length < 2 || evidence.quote.length > 500)) {
             problems.push('自动学习信息必须包含合法的类别、用途和原文证据')
         }
     }

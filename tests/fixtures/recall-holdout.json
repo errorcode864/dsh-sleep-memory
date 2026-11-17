@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "独立构造主题的回归集；未加入项目词表，不代表真实用户总体分布。",
+  "records": [
+    { "id": "smm_batch", "projectId": "orders", "content": "订单批处理每批最多 500 条，超过后按批次分页。", "keywords": ["批处理", "分页"] },
+    { "id": "smm_batches_other", "projectId": "other", "content": "订单批处理每批最多 100 条。" },
+    { "id": "smm_timeout", "projectId": "orders", "content": "订单 RPC 超时设为 3000 毫秒。" },
+    { "id": "smm_queue", "projectId": "orders", "content": "重试队列 RETRY_QUEUE_7 仅用于幂等订单请求。" },
+    { "id": "smm_cpu", "projectId": "orders", "content": "生产构建运行在 Linux x86_64 环境。" },
+    { "id": "smm_node", "projectId": "orders", "content": "Node.js 22.12.0 用于前端构建。" },
+    { "id": "smm_old_node", "projectId": "orders", "content": "Node.js 20.11.0 仅用于兼容测试。" },
+    { "id": "smm_directory", "projectId": "orders", "content": "证书目录是 /srv/Orders/certs。" },
+    { "id": "smm_dark", "content": "用户偏好深色主题和较少动画。" },
+    { "id": "smm_retired_queue", "projectId": "orders", "content": "历史队列 RETIRED_QUEUE_9 已废止。", "lifecycle": { "state": "invalid", "reason": "历史队列已停用", "at": 1, "revision": 1 } }
+  ],
+  "cases": [
+    { "id": "batch-size", "source": "constructed-holdout", "projectId": "orders", "query": "订单批处理分页规则", "expected": ["smm_batch"] },
+    { "id": "rpc-timeout", "source": "constructed-holdout", "projectId": "orders", "query": "订单 RPC 超时", "expected": ["smm_timeout"] },
+    { "id": "queue-identifier", "source": "constructed-holdout", "projectId": "orders", "query": "RETRY_QUEUE_7", "expected": ["smm_queue"] },
+    { "id": "architecture", "source": "constructed-holdout", "projectId": "orders", "query": "x86_64", "expected": ["smm_cpu"] },
+    { "id": "exact-node", "source": "constructed-holdout", "projectId": "orders", "query": "Node.js 22.12.0", "expected": ["smm_node"] },
+    { "id": "unknown-node", "source": "constructed-holdout", "projectId": "orders", "query": "Node.js 24.1.0", "expected": [] },
+    { "id": "certificate-path", "source": "constructed-holdout", "projectId": "orders", "query": "/srv/Orders/certs", "expected": ["smm_directory"] },
+    { "id": "case-sensitive-path", "source": "constructed-holdout", "projectId": "orders", "query": "/srv/orders/certs", "expected": [] },
+    { "id": "another-project", "source": "constructed-holdout", "projectId": "other", "query": "RPC 超时", "expected": [] },
+    { "id": "global-scope", "source": "constructed-holdout", "projectId": null, "query": "RETRY_QUEUE_7", "expected": [] },
+    { "id": "global-preference", "source": "constructed-holdout", "projectId": "orders", "query": "深色主题", "expected": ["smm_dark"] },
+    { "id": "number-noise", "source": "constructed-holdout", "projectId": "orders", "query": "500 3000 7", "expected": [] },
+    { "id": "generic-noise", "source": "constructed-holdout", "projectId": "orders", "query": "继续检查当前项目配置", "expected": [] },
+    { "id": "unrelated-science", "source": "constructed-holdout", "projectId": "orders", "query": "海王星大气成分", "expected": [] },
+    { "id": "retired-identifier", "source": "constructed-holdout", "projectId": "orders", "query": "RETIRED_QUEUE_9", "expected": [] }
+  ]
+}

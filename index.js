@@ -29,6 +29,10 @@ import { createMemoryIntelligence } from './memory-intelligence.js'
 import { createMemoryMetrics, estimateTokens } from './memory-metrics.js'
 import { summarizeMemory } from './memory-summary.js'
 import { buildRetrievalIndex, retrievalTerms, scoreRetrieval } from './memory-retrieval.js'
+import { createLocalSearchIndex } from './memory-search-index.js'
+import { planLocalRecall } from './memory-query-plan.js'
+import { learningJobsDomainSpec } from './memory-learning-jobs.js'
+import { createFeedbackStore, feedbackDomainSpec } from './memory-feedback.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
   initialSchedule, failedSchedule, nextSleepTime, memoryVersion, createInjectionTracker,
@@ -174,6 +178,29 @@ function resolveConfig(raw) {
   numberField('semanticRecallWeight', 'number', 0, 1, 0.5) // 扩展词 BM25 分的加权系数（与原词分相加）
   numberField('semanticRecallTimeoutMs', 'integer', 500, 30_000, 3_000) // 扩展调用超时（注入路径延迟敏感，短于评分超时）
   numberField('semanticMaxTerms', 'integer', 1, 20, 8) // 参与混合召回的扩展检索词上限
+  for (const [key, values, fallback] of [
+    ['recallPlanMode', ['off', 'shadow', 'local'], 'off'],
+    ['learningPolicyMode', ['current', 'evidence'], 'current'],
+  ]) {
+    delete unknown[key]
+    resolved[key] = source[key] === undefined ? fallback : source[key]
+    if (!values.includes(resolved[key])) problems.push(`config.${key} 必须为 ${values.join('、')}`)
+  }
+  delete unknown.recallAliases
+  resolved.recallAliases = source.recallAliases === undefined ? [] : source.recallAliases
+  if (!Array.isArray(resolved.recallAliases) || resolved.recallAliases.length > 64
+    || resolved.recallAliases.some((alias) => !alias || typeof alias !== 'object' || Array.isArray(alias)
+      || Object.keys(alias).some((key) => !['projectId', 'phrase', 'target'].includes(key))
+      || !Object.hasOwn(alias, 'projectId')
+      || (alias.projectId !== null && (typeof alias.projectId !== 'string' || !alias.projectId.trim()
+        || alias.projectId !== alias.projectId.trim() || alias.projectId.length > 200))
+      || ['phrase', 'target'].some((key) => typeof alias[key] !== 'string' || !alias[key].trim() || alias[key].length > 160))) {
+    problems.push('recallAliases 必须为最多 64 条包含 projectId、phrase 和 target 的项目术语')
+  }
+  booleanField('feedbackEnabled', false)
+  booleanField('feedbackRankingEnabled', false)
+  numberField('recallMinCoverage', 'number', 0, 1, 0.35)
+  if (resolved.feedbackRankingEnabled && !resolved.feedbackEnabled) problems.push('反馈排序必须同时开启反馈记录')
 
   // 普通知识在轮次完成后学习，候选召回在进入上下文前独立审核。
   booleanField('autoLearnEnabled', true)
@@ -1043,30 +1070,52 @@ async function runRecallCore(table, query, scope) {
   if (scope.automatic && retrievalTerms(query).length === 0) {
     return { ranked: [], associated: [], totalCandidates: candidates.length, now }
   }
-  const index = buildRetrievalIndex(candidates.map(([, rec]) => [rec.content, ...rec.tags, ...rec.keywords]))
+  const index = scope.searchIndex
+    ? scope.searchIndex.build(candidates.map(([, rec]) => rec))
+    : buildRetrievalIndex(candidates.map(([, rec]) => [rec.content, ...rec.tags, ...rec.keywords]))
+  scope.searchIndex?.retain(all.map(([id]) => id))
   const scores = scoreRetrieval(index, query, { automatic: scope.automatic })
   const expandedScores = expandedTerms?.length
     ? scoreRetrieval(index, expandedTerms.join('\n'), { automatic: scope.automatic }) : []
-  const ranked = candidates
+  const local = cfg.recallPlanMode !== 'off'
+    ? planLocalRecall(index, query, scope.projectId, cfg.recallAliases, cfg.recallMinCoverage) : null
+  const localExpandedScores = local && expandedTerms?.length
+    ? scoreRetrieval(index, expandedTerms.join('\n'), { automatic: true, local: true, minCoverage: cfg.recallMinCoverage }) : []
+  const rank = (directScores, aliasScores = [], expansions = expandedScores) => candidates
     .map(([id, rec], i) => {
-      const direct = scores[i]
+      const direct = directScores[i]
       let score = direct.score
-      if (i < expandedScores.length) {
-        score += cfg.semanticRecallWeight * expandedScores[i].score
+      if (i < expansions.length) {
+        score += cfg.semanticRecallWeight * expansions[i].score
       }
+      if (aliasScores[i]?.score > 0) score += 0.5 * aliasScores[i].score
       if (rec.layer === 'salient' && rec.arousal !== null) {
         score *= 1 + cfg.salienceRecallBoost * rec.arousal
       }
       // 原查询中的精确实体冲突不能被扩展词或情绪加成绕过。
       if (direct.conflicts.length > 0) score = 0
       // 扩展权重只调整排序，不把可靠的同义候选压到门槛以下；最终仍须通过有效词与审核。
-      const thresholdScore = score > 0 ? Math.max(score, expandedScores[i]?.score ?? 0) : 0
-      const retrieval = { ...direct.evidence, ...(expandedScores[i]?.score > 0 ? { expanded: expandedScores[i].evidence } : {}) }
+      const thresholdScore = score > 0 ? Math.max(score, expansions[i]?.score ?? 0, aliasScores[i]?.score ?? 0) : 0
+      if (scope.feedbackRanking) score *= scope.feedbackRanking(rec, query, scope.projectId, view.lifecycleOf(rec))
+      const retrieval = {
+        ...direct.evidence, ...(expansions[i]?.score > 0 ? { expanded: expansions[i].evidence } : {}),
+        ...(aliasScores[i]?.score > 0 ? { aliases: aliasScores[i].phrases } : {}),
+      }
       return { id, rec, score, thresholdScore, retrieval }
     })
     .filter((hit) => (hit.score > 0 || query.trim() === '') && hit.thresholdScore >= (scope.minScore ?? 0))
     .sort((a, b) => b.score - a.score || b.rec.lastAccessAt - a.rec.lastAccessAt)
     .slice(0, limit)
+  const original = rank(scores)
+  const planned = local ? rank(local.scores, local.aliases, localExpandedScores) : original
+  const ranked = cfg.recallPlanMode === 'local' ? planned : original
+  if (scope.planState) {
+    scope.planState.queries += 1
+    scope.planState.last = {
+      mode: cfg.recallPlanMode, candidates: candidates.length, aliasCount: local?.aliasCount ?? 0,
+      originalIds: original.map((hit) => hit.id), plannedIds: planned.map((hit) => hit.id),
+    }
+  }
 
   const conflictingEntityIds = new Set(candidates.filter((_, index) => scores[index].conflicts.length > 0).map(([id]) => id))
   const associated = spreadActivation(all, ranked, { ...scope, layerFilter, timeFilter, cfg, conflictingEntityIds })
@@ -1246,6 +1295,10 @@ const GUI_CONFIG_FIELDS = [
   { key: 'autoLearnEnabled', type: 'boolean' },
   { key: 'recallReviewEnabled', type: 'boolean' },
   { key: 'semanticRecallEnabled', type: 'boolean' },
+  { key: 'recallPlanMode', type: 'string' },
+  { key: 'learningPolicyMode', type: 'string' },
+  { key: 'feedbackEnabled', type: 'boolean' },
+  { key: 'feedbackRankingEnabled', type: 'boolean' },
 ]
 
 function apiFail(code, message) {
@@ -1448,7 +1501,7 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['correct', 'setState', 'export', 'import', 'bind'].includes(input.action)) {
+    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1549,6 +1602,7 @@ class SleepMemoryApiService {
         next[key] = value
       }
     }
+    resolveConfig({ ...inherited, ...next })
     const currentKeys = Object.keys(current)
     const nextKeys = Object.keys(next)
     if (currentKeys.length === nextKeys.length && currentKeys.every((key) => next[key] === current[key])) {
@@ -1566,12 +1620,15 @@ export function apply(ctx, config) {
   let sleeping = false
   const controllers = new Set()
   const metrics = createMemoryMetrics()
+  const searchIndex = createLocalSearchIndex()
+  const planState = { queries: 0, last: null }
   const runtime = {
     loadedAt: Date.now(), lastSleep: null, lastSleepError: null, nextSleepAt: null,
     scoring: { attempted: 0, stored: 0, skipped: 0, failed: 0 },
     expansion: { attempted: 0, succeeded: 0, failed: 0 },
     injection: { injected: 0, budgetSkipped: 0, duplicateSkipped: 0 },
     metrics: metrics.state,
+    searchIndex: searchIndex.state, recallPlan: planState,
   }
   let scheduleState = initialSchedule()
   let scheduleLoaded = false
@@ -1584,6 +1641,8 @@ export function apply(ctx, config) {
       sleepIntervalMinutes: cfg.sleepIntervalMinutes, sleepOnStart: cfg.sleepOnStart,
       salientScoringEnabled: cfg.salientScoringEnabled, semanticRecallEnabled: cfg.semanticRecallEnabled,
       autoLearnEnabled: cfg.autoLearnEnabled, recallReviewEnabled: cfg.recallReviewEnabled,
+      recallPlanMode: cfg.recallPlanMode, learningPolicyMode: cfg.learningPolicyMode,
+      feedbackEnabled: cfg.feedbackEnabled, feedbackRankingEnabled: cfg.feedbackRankingEnabled,
     })
   }
   // 同一插件实例内串行读改写，防止睡眠快照覆盖已提交的召回强化或事实纠正。
@@ -1618,15 +1677,23 @@ export function apply(ctx, config) {
   // execute 内仍通过原 promise 感知 open 失败。
   const domainPromise = /** @type {Promise<MemoryDomain>} */ (ctx.storageDomain.open(memoryDomainSpec))
   const runtimeDomainPromise = ctx.storageDomain.open(runtimeDomainSpec)
+  const learningDomainPromise = cfg.autoLearnEnabled && cfg.learningPolicyMode === 'evidence'
+    ? ctx.storageDomain.open(learningJobsDomainSpec(parseStoredRecord)) : null
+  const feedbackDomainPromise = cfg.feedbackEnabled ? ctx.storageDomain.open(feedbackDomainSpec) : null
+  const feedback = feedbackDomainPromise
+    ? createFeedbackStore(() => feedbackDomainPromise.then((domain) => domain.table('records'))) : null
+  if (feedback) runtime.feedback = feedback.state
   domainPromise.catch(() => {})
   runtimeDomainPromise.catch(() => {})
+  learningDomainPromise?.catch(() => {})
+  feedbackDomainPromise?.catch(() => {})
   ctx.effect(() => async () => {
     disposed = true
     clearTimeout(scheduleTimer)
     for (const controller of controllers) controller.abort()
     await intelligence.drain()
     await mutations
-    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise])
+    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise].filter(Boolean))
     for (const domain of domains) if (domain.status === 'fulfilled') await domain.value.close()
   })
 
@@ -1647,6 +1714,7 @@ export function apply(ctx, config) {
   const intelligence = createMemoryIntelligence({
     ctx, cfg, records, resolveScope, withMutation, controllers,
     tokenize: retrievalTerms, isDisposed: () => disposed, metrics,
+    learningJobs: learningDomainPromise ? () => learningDomainPromise.then((domain) => domain.table('records')) : null,
   })
   Object.assign(runtime, intelligence.state)
   const manageScope = async (args, contextSessionId) => {
@@ -1679,9 +1747,10 @@ export function apply(ctx, config) {
         .filter((record) => record.kind === 'binding' && !record.released).slice(0, 500),
     }
   }
-  const manageExtended = async (args, execution) => executeMemoryManagement(args, {
+  const manageExtended = async (args, execution, trustedFeedback = false) => executeMemoryManagement(args, {
     table: await records(), cfg, parseRecord: parseStoredRecord, status,
     manageScope: (input) => manageScope(input, getSessionId(execution)),
+    feedback, trustedFeedback,
   })
   const scheduleReady = runtimeRecords().then((table) => {
     scheduleState = table.get('schedule') ?? initialSchedule()
@@ -1699,7 +1768,7 @@ export function apply(ctx, config) {
     workspaceScopes,
     runSleepCycle: (dryRun) => runMemorySleep(dryRun),
     status, scope: (args) => withMutation(() => manageScope(args)),
-    manage: (args) => withMutation(() => manageExtended(args)),
+    manage: (args) => withMutation(() => manageExtended(args, undefined, true)),
   })
 
   // ---- memory_write -------------------------------------------------------
@@ -2264,7 +2333,7 @@ export function apply(ctx, config) {
       return { card: 'generic', title: `记忆检索${shown ? ` · ${shown}` : ''}`, kind: 'read' }
     },
     presentResult: recallCardResult,
-    async execute(args) {
+    async execute(args, execution) {
       const startedAt = performance.now()
       const problems = validateRecallArgs(args)
       if (problems.length > 0) {
@@ -2277,7 +2346,10 @@ export function apply(ctx, config) {
         return { code: 'invalid_args', message: 'memory_recall 需要 query、layers 或时间窗至少其一。' }
       }
       const table = await records()
+      if (feedback) await feedback.ready
       const { ranked, associated, totalCandidates, now } = await runRecallCore(table, query, {
+        searchIndex, planState,
+        feedbackRanking: cfg.feedbackRankingEnabled ? feedback.ranking : null,
         limit: args.limit ?? cfg.recallBudget,
         layerFilter,
         timeFilter,
@@ -2307,6 +2379,10 @@ export function apply(ctx, config) {
             via: found.via,
           })),
         ],
+      }
+      if (feedback) {
+        const presented = await feedback.record([...ranked, ...associated], query, args.projectId, getSessionId(execution), 'explicit', recordView)
+        for (const hit of result.hits) hit.exposureId = presented.get(hit.id)
       }
       const durationMs = Math.round(performance.now() - startedAt)
       const estimatedTokens = estimateTokens(JSON.stringify(result, null, 2))
@@ -2854,6 +2930,7 @@ export function apply(ctx, config) {
         if (!cfg.injectEnabled || cfg.injectBudget <= 0 || payload.signal?.aborted) return decision
         const startedAt = performance.now()
         const table = await records()
+        if (feedback) await feedback.ready
         // 语义扩展召回（M8，默认关）：只在注入路径做；失败静默退化为纯 BM25，不阻塞注入。
         const expandedTerms = cfg.semanticRecallEnabled
           ? await expandQueryTerms(payload.modelSelection, queryText)
@@ -2865,6 +2942,8 @@ export function apply(ctx, config) {
           return seen
         }
         const core = await runRecallCore(table, queryText, {
+          searchIndex, planState,
+          feedbackRanking: cfg.feedbackRankingEnabled ? feedback.ranking : null,
           limit: cfg.recallReviewEnabled ? cfg.recallCandidateBudget : cfg.injectBudget,
           layerFilter: undefined, cfg, expandedTerms,
           minScore: cfg.injectMinScore, projectId: scope.projectId, automatic: true, exclude,
@@ -2906,6 +2985,9 @@ export function apply(ctx, config) {
             estimatedTokens: direct.length > 0 ? estimateTokens(text) : 0,
           })
           if (direct.length === 0) return decision
+          await reinforceHits(table, direct, cfg, core.now)
+          const presented = feedback
+            ? await feedback.record([...direct, ...associated], queryText, scope.projectId, scope.sessionId, 'automatic', view) : null
           const injected = {
             id: randomUUID(),
             role: 'user',
@@ -2913,10 +2995,10 @@ export function apply(ctx, config) {
             source: {
               kind: 'sleep-memory', triggerId: queryMessage?.id,
               recalled: [...direct.map((hit) => hit.id), ...associated.map((found) => found.rec.id)],
+              ...(presented ? { exposures: [...presented.values()] } : {}),
             },
           }
           const messages = entered.toSpliced(lastClaimedIndex + 1, 0, injected)
-          await reinforceHits(table, direct, cfg, core.now)
           injectionTracker.remember(session, [...direct, ...associated]
             .map((hit) => memoryVersion(hit.rec, view.lifecycleOf(hit.rec))))
           runtime.injection.injected += direct.length + associated.length
@@ -2947,7 +3029,7 @@ export function apply(ctx, config) {
   }).catch((error) => { console.error('[sleep-memory] 睡眠调度初始化失败', error) })
 }
 
-/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallReviewTimeoutMs: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number}} MemoryConfig */
+/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallReviewTimeoutMs: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
 /** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
 /** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */

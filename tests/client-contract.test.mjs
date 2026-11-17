@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
+import { webcrypto } from 'node:crypto'
 import { createHarness, fixture, flushTasks } from './harness.mjs'
 
 /** 执行真实 client 模块和 Remote 描述符；替身只提供宿主、React 生命周期。 */
@@ -79,7 +80,7 @@ async function createClient(host) {
             createElement: () => ({ click() { downloads.push({ href: this.href, download: this.download }) } }),
             head: { appendChild: () => {} },
         },
-        Blob,
+        Blob, crypto: webcrypto,
         URL: { createObjectURL: () => 'blob:隔离测试备份', revokeObjectURL: (url) => revoked.push(url) },
         setTimeout, clearTimeout, setInterval, clearInterval, console,
     })
@@ -122,8 +123,8 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 6)
-        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展']) {
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 8)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
         assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
@@ -144,6 +145,10 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await assert.rejects(host.api.setConfig({ changes: { injectMaxEstimatedTokens: 99 } }), /injectMaxEstimatedTokens/)
         assert.ok(client.registrations[0].descriptors.some((descriptor) => descriptor.method === 'status' && descriptor.parameters.length === 0))
         await assert.rejects(host.api.setConfig({ changes: { projectId: ' 甲 ' } }), /projectId/)
+        await host.api.setConfig({ changes: { recallPlanMode: 'shadow', learningPolicyMode: 'evidence' } })
+        assert.equal(override.recallPlanMode, 'shadow')
+        assert.equal(override.learningPolicyMode, 'evidence')
+        await assert.rejects(host.api.setConfig({ changes: { recallPlanMode: 'embedding' } }), /recallPlanMode/)
     } finally { client.dispose() }
 })
 
@@ -290,6 +295,35 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
         for (const label of ['学习 Token', '审核 Token', '扩展 Token', '评分 Token', '注入 Token 估算', '按需证据读取']) {
             assert.ok(flatten(statusTree).some((node) => node.type === 'th' && node.children.includes(label)))
         }
+    } finally { client.dispose() }
+})
+
+test('原文反馈面板调用真实 Remote 写入并撤回明确用户反馈', async () => {
+    const host = createHarness({ feedbackEnabled: true })
+    await host.table.put('smm_feedback_ui', fixture('smm_feedback_ui'))
+    await host.call('memory_recall', { query: 'UNIQUE_42' })
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const rowNode = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        let row = await client.render(rowNode.type, rowNode.props)
+        flatten(row).find((node) => node.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        row = await client.render(rowNode.type, rowNode.props)
+        const node = flatten(row).find((item) => item.type?.name === 'FeedbackPanel')
+        let panel = await client.render(node.type, node.props)
+        flatten(panel).find((item) => item.type === 'button' && item.children.includes('无关')).props.onClick()
+        await flushTasks()
+        await flushTasks()
+        const detail = await host.api.getRecord({ id: 'smm_feedback_ui' })
+        assert.equal(detail.exposures[0].feedback.signal, 'irrelevant')
+        panel = await client.render(node.type, { ...node.props, detail })
+        flatten(panel).find((item) => item.type === 'button' && item.children.includes('撤回反馈')).props.onClick()
+        await flushTasks()
+        await flushTasks()
+        assert.equal((await host.api.getRecord({ id: 'smm_feedback_ui' })).exposures[0].feedback, null)
     } finally { client.dispose() }
 })
 

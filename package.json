@@ -4,7 +4,8 @@
   "scripts": {
     "test": "node smoke.mjs && node --test tests/*.test.mjs",
     "eval": "node eval.mjs",
-    "test:host": "node tests/host-integration.mjs"
+    "test:host": "node tests/host-integration.mjs",
+    "bench:search": "node tests/search-benchmark.mjs"
   },
   "repository": {
     "type": "git",
@@ -28,7 +29,11 @@
     "memory-management.js",
     "memory-runtime.js",
     "memory-intelligence.js",
+    "memory-learning-jobs.js",
+    "memory-feedback.js",
     "memory-retrieval.js",
+    "memory-search-index.js",
+    "memory-query-plan.js",
     "memory-metrics.js",
     "memory-summary.js",
     "memory-evaluation.js",

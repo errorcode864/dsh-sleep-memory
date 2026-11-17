@@ -834,6 +834,7 @@ window.__ModuleLoader__.load({
                     ...detail.chain.map((record) => h('div', { className: 'sm-record-history', key: record.id },
                       h('code', null, record.id), h('p', { className: 'sm-record-original' }, record.content)))) : null,
                   h(RecordEditor, { detail, onChanged: () => { void loadDetail(); onChanged?.(); } })),
+                detail.feedbackEnabled ? h(FeedbackPanel, { detail, onChanged: () => void loadDetail() }) : null,
                 h('section', { className: 'sm-record-section', 'aria-label': '来源记录' },
                   h('h3', null, `来源记录 · ${detail.totalSources} 条`),
                   detail.totalSources === 0 ? h('p', { className: 'sm-runtime-note' }, '没有关联来源记录。') : null,
@@ -849,6 +850,41 @@ window.__ModuleLoader__.load({
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
         const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+
+        /** 反馈绑定实际呈现的版本，事实状态仍由管理入口核对后修改。 */
+        function FeedbackPanel({ detail, onChanged }) {
+          const [busy, setBusy] = useState(false);
+          const [message, setMessage] = useState('');
+          const labels = { helpful: '有用', irrelevant: '无关', incorrect: '错误', outdated: '过时' };
+          const submit = async (exposure, signal) => {
+            setBusy(true); setMessage('');
+            try {
+              await call('manage', {
+                action: 'feedback', eventId: crypto.randomUUID(), exposureId: exposure.id, signal,
+                ...(signal === 'retract' ? { retracts: exposure.feedback.eventId } : {}),
+              });
+              setMessage(signal === 'retract' ? '已撤回反馈。' : '已记录反馈。'); onChanged();
+            } catch (error) {
+              setMessage(`反馈失败：${error.message}`);
+            } finally { setBusy(false); }
+          };
+          return h('section', { className: 'sm-record-section', 'aria-label': '召回反馈' },
+            h('h3', null, '召回反馈'),
+            h('p', { className: 'sm-runtime-note' }, '仅对实际呈现记录反馈；错误或过时内容请在上方管理中核对。'),
+            detail.exposures.length ? detail.exposures.map((exposure) => h('div', { className: 'sm-record-history', key: exposure.id },
+              h('p', null, `${relTime(exposure.at)} · ${exposure.projectId ?? '全局'} · ${exposure.mode === 'automatic' ? '自动注入' : '主动召回'}${exposure.currentVersion ? '' : ' · 历史版本'}`),
+              exposure.feedback ? h('p', { role: 'status' }, `反馈：${labels[exposure.feedback.signal]}`) : null,
+              h('div', { className: 'sm-rowtags' }, Object.entries(labels).map(([signal, label]) => h('button', {
+                key: signal, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                onClick: () => void submit(exposure, signal),
+              }, label)),
+              exposure.feedback ? h('button', {
+                type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                onClick: () => void submit(exposure, 'retract'),
+              }, '撤回反馈') : null)))
+              : h('p', { className: 'sm-runtime-note' }, '暂无实际呈现记录。'),
+            message ? h('p', { role: 'status' }, message) : null);
+        }
 
         /** 纠正前展示新旧正文，状态变更必须先取得服务端影响计划。 */
         function RecordEditor({ detail, onChanged }) {
@@ -1207,6 +1243,9 @@ window.__ModuleLoader__.load({
                       counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
                       counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
                       counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
+                      counterRow('本地分词缓存', `复用 ${state.searchIndex?.reused ?? 0} 条，重建 ${state.searchIndex?.rebuilt ?? 0} 条，缓存 ${state.searchIndex?.cached ?? 0} 条`),
+                      counterRow('本地检索规划', `${state.recallPlanMode ?? 'off'}；原候选 ${state.recallPlan?.last?.originalIds.length ?? 0} 条，规划候选 ${state.recallPlan?.last?.plannedIds.length ?? 0} 条`),
+                      counterRow('持久反馈', `呈现 ${state.feedback?.exposures ?? 0} 条，反馈事件 ${state.feedback?.events ?? 0} 条，呈现保存失败 ${state.feedback?.failed ?? 0} 次；${state.feedback?.lastError ?? '无保存错误'}`),
                       ...Object.entries(state.metrics?.models ?? {}).map(([stage, usage]) => counterRow(
                         { learning: '学习 Token', review: '审核 Token', expansion: '扩展 Token', scoring: '评分 Token' }[stage],
                         `模型实报 ${usage.reported.totalTokens}（缓存读取 ${usage.reported.cacheReadTokens}）；未实报调用估算 ${usage.estimated.totalTokens}；调用 ${usage.calls} 次，失败 ${usage.failed} 次，累计 ${usage.durationMs} 毫秒`)),
@@ -1482,7 +1521,8 @@ window.__ModuleLoader__.load({
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
-          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled'];
+          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled',
+          'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
         function configDraftFrom(fields) {
@@ -1604,6 +1644,8 @@ window.__ModuleLoader__.load({
             ['autoLearnEnabled', '自主学习有用信息', '完成对话后后台提取有来源的事实和经验；冲突内容标记待复核'],
             ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
             ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
+            ['feedbackEnabled', '记录召回与用户反馈', '按呈现版本保存反馈；曝光次数不代表认可'],
+            ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],
             ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
           ]) {
@@ -1612,6 +1654,18 @@ window.__ModuleLoader__.load({
               h('span', { className: 'sm-config-label' }, label),
               h('input', { type: 'checkbox', disabled: busy, checked: parsed[key] === true, onChange: () => setBoolean(key) }),
               h('span', { className: 'sm-config-hint' }, hint),
+              fields[key].overridden ? resetButton(key) : null));
+          }
+          for (const [key, label, options] of [
+            ['recallPlanMode', '本地检索规划', [['off', '原流程'], ['shadow', '影子对照'], ['local', '本地规划']]],
+            ['learningPolicyMode', '自主学习策略', [['current', '当前策略'], ['evidence', '证据与持久去重']]],
+          ]) {
+            if (!fields[key]) continue;
+            rows.push(h('label', { className: 'sm-config-row', key },
+              h('span', { className: 'sm-config-label' }, label),
+              h('select', { className: 'sm-select', disabled: busy, value: String(draft[key] ?? fields[key].value),
+                onChange: (event) => setNumber(key, event.target.value) },
+              options.map(([value, text]) => h('option', { key: value, value }, text))),
               fields[key].overridden ? resetButton(key) : null));
           }
           if (fields.projectId) rows.push(h('label', { className: 'sm-config-row', key: 'projectId' },

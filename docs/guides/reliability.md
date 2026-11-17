@@ -20,6 +20,7 @@ source_of_truth: code-and-script
 - [运行和兼容](#运行和兼容)
 - [验证](#验证)
 - [评测与消耗统计](#评测与消耗统计)
+- [本地检索、学习与反馈](#本地检索学习与反馈)
 
 ## 范围和来源
 
@@ -65,6 +66,64 @@ source_of_truth: code-and-script
 上述参数交给 `memory_write`。来源是调用者的声明，不提升指令权限。
 自动情绪评分写入 `kind: model`、`confirmed: false` 的来源；不会从情绪分数
 推断事实真实性。经历建议记录情境、行动、结果、适用条件，事实保持精确。
+
+## 本地检索、学习与反馈
+
+本地检索不调用嵌入模型且不增加模型依赖，已有聊天模型学习、审核与可选改写继续保留。
+分词缓存默认启用，内容未变时召回强化不会重新分词，词频仍在当前过滤范围内计算。
+
+| 配置 | 默认 | 作用 |
+| --- | --- | --- |
+| `recallPlanMode` | `off` | `off` 沿用原流程；`shadow` 只记录候选差异；`local` 使用强词与覆盖度筛选 |
+| `recallMinCoverage` | `0.35` | 本地通道最低加权覆盖度，取值为 0 至 1 |
+| `recallAliases` | `[]` | 最多 64 条项目术语，按完整短语匹配后补充检索 |
+| `learningPolicyMode` | `current` | `evidence` 接受短证据并持久去重，`current` 保持已有策略 |
+| `feedbackEnabled` | `false` | 持久记录实际呈现及 GUI 用户反馈 |
+| `feedbackRankingEnabled` | `false` | 需同时开启反馈记录，同查询、范围和版本的反馈才调整排序 |
+
+模式、学习策略与反馈开关可在插件配置页编辑，术语表与覆盖度通过 profile 配置。
+示例中的项目 ID 必须与记忆归属一致，工作区范围通常为 `workspace:<workspaceId>`。
+
+```yaml
+recallPlanMode: shadow
+learningPolicyMode: evidence
+feedbackEnabled: true
+feedbackRankingEnabled: false
+recallAliases:
+  - projectId: project-a
+    phrase: 登录过期
+    target: JWT refresh_token 续期
+```
+
+`projectId: null` 的术语仅用于全局查询，不自动加入项目词表。
+英文与技术标识符保留边界，例如 `JWT` 不匹配 `other_jwt`。
+别名是显式术语映射，不代表具备无词表的通用语义理解；原问题实体冲突仍阻止召回。
+本地规划在较长中文查询中去掉孤立单字锚点，独立术语查询仍可用，空查询按层浏览不变。
+提高覆盖度能减少部分主题词误匹配，也可能增加不同说法的漏召回，先用影子报告再决定启用。
+
+证据策略只处理有稳定用户消息 ID 的已完成轮次，纯继续或确认不调用学习模型。
+候选通过逐字证据检查后保存在 `memory_learning_jobs`，固定记忆 ID 后再写事实。
+同一来源重放或重载不重复抽取，已准备任务可恢复，模型失败本身不标记完成。
+恢复时重新核对项目、容量与关联事实，项目绑定改变的旧任务保持待处理。
+
+开启反馈后，在“原文与来源 → 召回反馈”中标记有用、无关、错误或过时。
+只展示最近 10 次实际呈现，不以访问次数推断用户认可。
+反馈事件可撤回且保存在 `memory_feedback`，工具不能冒充 GUI 用户提交。
+负反馈将同条件候选分数乘以 0.7，正反馈乘以 1.15，不能恢复零分或实体冲突候选。
+呈现日志保存失败不阻断已通过审核的召回，运行详情会报告失败且该次不提供反馈 ID。
+错误与过时反馈不自动改事实，核对后使用已有纠正或有效性管理。
+新版本不继承旧版本反馈，历史反馈仍可查看。
+
+原有 JSON 备份不包含学习任务和反馈域，跨机器只恢复事实与证据。
+运行详情展示分词复用、候选差异和反馈计数，反馈总数为已加载持久资料，其他运行计数仍按本次加载统计。
+
+```bash
+npm run eval -- --baseline-ref 81ec60d --report tmp/phase-5-7-comparison.json
+npm run eval -- --aliases /absolute/path/aliases.json --report tmp/with-aliases.json
+```
+
+报告分别包含 `current`、`shadow`、`local`，提供 `--aliases` 时另列配置术语实验。
+不把词表实验并入无词表结果，离线测试未调用真实 LLM。
 
 ## 项目浏览与分组
 

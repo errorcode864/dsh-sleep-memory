@@ -191,7 +191,7 @@ export function analyzeRetrievalText(text) {
 }
 
 /** 正文、标签和关键词分别分析，避免拼接字段制造不存在的短语或数字语境。 */
-function analyzeFields(fields) {
+export function analyzeFields(fields) {
     const analysis = createAnalysis()
     for (const field of fields) {
         const part = analyzeRetrievalText(field)
@@ -214,7 +214,11 @@ export function retrievalTerms(text) {
 }
 
 export function buildRetrievalIndex(documents) {
-    const analyses = documents.map((fields) => analyzeFields(Array.isArray(fields) ? fields : [fields]))
+    return buildIndexFromAnalyses(documents.map((fields) => analyzeFields(Array.isArray(fields) ? fields : [fields])))
+}
+
+/** 只统计当前范围的词频，缓存分析结果不能令其他项目参与排序。 */
+export function buildIndexFromAnalyses(analyses) {
     const frequencies = new Map()
     const lengths = analyses.map((analysis) => {
         let length = 0
@@ -239,8 +243,15 @@ function conflictingEntities(query, document) {
 }
 
 /** 分层加权 BM25：完整实体优先，覆盖度参与排序，弱碎片不能独立通过自动召回。 */
-export function scoreRetrieval(index, queryText, { automatic = false } = {}) {
+export function scoreRetrieval(index, queryText, { automatic = false, local = false, minCoverage = 0 } = {}) {
     const query = analyzeRetrievalText(queryText)
+    if (local && (queryText.match(/\p{Script=Han}/gu)?.length ?? 0) > 1) {
+        const standalone = new Set([...queryText.matchAll(/(?:^|[^\p{Script=Han}])(\p{Script=Han})(?=的|是|为|[^\p{Script=Han}]|$)/gu)]
+            .map((match) => match[1]))
+        for (const [key, token] of query.tokens) {
+            if (token.type === 'word' && /^\p{Script=Han}$/u.test(token.value) && !standalone.has(token.value)) query.tokens.delete(key)
+        }
+    }
     const primary = [...query.tokens.values()].filter((token) => token.anchor)
     const totalWeight = primary.reduce((sum, token) => sum + token.weight, 0)
     return index.analyses.map((document, position) => {
@@ -266,7 +277,7 @@ export function scoreRetrieval(index, queryText, { automatic = false } = {}) {
             }
         }
         const coverage = totalWeight ? matchedWeight / totalWeight : 0
-        const eligible = conflicts.length === 0 && (!automatic || anchors > 0)
+        const eligible = conflicts.length === 0 && (!automatic || anchors > 0) && coverage >= minCoverage
         return {
             score: eligible ? score * (0.35 + 0.65 * coverage) : 0,
             eligible, conflicts,

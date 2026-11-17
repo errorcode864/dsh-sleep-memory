@@ -14,7 +14,7 @@ const testRoot = resolve(import.meta.dirname, '../tmp')
 await mkdir(testRoot, { recursive: true })
 const root = await mkdtemp(resolve(testRoot, 'host-integration-'))
 
-function startInstance() {
+function startInstance(config = {}) {
     const backend = new JsonStorageBackend(root)
     const facility = new DomainFacility({
         storage: { backend: { get: () => backend } },
@@ -59,7 +59,10 @@ function startInstance() {
                 },
             }),
         },
-    }, { sleepIntervalMinutes: 60, sleepOnStart: false, salientScoringEnabled: false, dreamMaxCandidates: 0 })
+    }, {
+        sleepIntervalMinutes: 60, sleepOnStart: false, salientScoringEnabled: false, dreamMaxCandidates: 0,
+        learningPolicyMode: 'evidence', feedbackEnabled: true, recallPlanMode: 'local', ...config,
+    })
     return {
         api, handlers,
         call: (name, args, execution) => tools.get(name).execute(args, execution),
@@ -78,6 +81,7 @@ let id
 let correctedId
 let successfulSleepAt
 let learnedId
+let exposureId
 try {
     await first.api.manage({ action: 'bind', sessionId, projectId: '测试项目' })
     const write = await first.call('memory_write', { content: '部署端口 8600', kind: 'fact' }, execution)
@@ -111,6 +115,8 @@ try {
     const learned = await first.call('memory_recall', { query: 'Java', projectId: '测试项目' })
     learnedId = learned.hits[0].id
     assert.equal(learned.fidelity, 'summary')
+    exposureId = learned.hits[0].exposureId
+    await first.api.manage({ action: 'feedback', eventId: 'host-feedback', exposureId, signal: 'helpful' })
     assert.equal((await first.api.status()).metrics.retrieval.queries, 2)
 } finally {
     await first.close()
@@ -126,6 +132,26 @@ try {
     const learned = await second.api.getRecord({ id: learnedId })
     assert.equal(learned.record.source.kind, 'model')
     assert.equal(learned.record.learning.evidence[0].messageId, 'integration-user')
+    assert.equal(learned.exposures[0].feedback.signal, 'helpful')
+    assert.equal((await second.api.manage({
+        action: 'feedback', eventId: 'host-feedback', exposureId, signal: 'helpful',
+    })).duplicate, true)
+    const emit = (type, data) => second.handlers.get('session/event')({ id: sessionId }, { type, data })
+    emit('turn/start', { turn: 1 })
+    emit('user/message', {
+        id: 'integration-user', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: '集成验收项目的构建固定使用 Java 21。' }],
+    })
+    emit('assistant/message', { message: {
+        role: 'assistant', source: { provider: 'mock', model: 'mock' },
+        content: [{ type: 'text', text: '重放相同来源。' }],
+    } })
+    emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    for (let attempt = 0; attempt < 100 && (await second.api.status()).learning.duplicates === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal((await second.api.status()).learning.duplicates, 1)
+    assert.equal((await second.api.status()).metrics.models.learning.calls, 0)
     const learnedBackup = await second.api.manage({ action: 'export' })
     assert.ok(JSON.stringify(learnedBackup).includes('集成验收项目的构建固定使用 Java 21。'))
     const request = { action: 'setState', id, projectId: '测试项目', state: 'active', reason: '集成验证恢复最新事实' }
@@ -139,7 +165,9 @@ try {
     assert.equal(imported.skipped, 3)
     const files = await readdir(resolve(root, 'memory_runtime'))
     assert.ok(files.length > 0)
-    console.log('宿主真实存储集成通过：摘要召回、Token 计量、自主学习、范围绑定、纠正链、持久调度与备份预演。')
+    assert.ok((await readdir(resolve(root, 'memory_feedback'))).length > 0)
+    assert.ok((await readdir(resolve(root, 'memory_learning_jobs'))).length > 0)
+    console.log('宿主真实存储集成通过：本地规划、学习持久去重、反馈重载、摘要、计量、范围、纠正链与备份预演。')
     console.log(`隔离数据保留：${root}`)
 } finally {
     await second.close()

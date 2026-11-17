@@ -1,22 +1,25 @@
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { createHarness, fixture } from './harness.mjs'
 
 // 仅供本地浏览器验收：真实插件客户端与宿主随附 React，数据来自隔离内存替身。
 const assetsRoot = process.env.DSH_PREVIEW_ASSETS
 if (!assetsRoot) throw new Error('需要 DSH_PREVIEW_ASSETS 指向已安装宿主的前端 assets 目录')
-const hostSource = await readFile(resolve(assetsRoot, 'index-CnyQSzND.js'), 'utf8')
-const bootMarker = 'const Ys=globalThis.dshDesktopBoot'
-if (!hostSource.includes(bootMarker) || !hostSource.includes('function dV()')) {
+const entry = (await readdir(assetsRoot)).filter((name) => /^index-.*\.js$/.test(name))
+if (entry.length !== 1) throw new Error('宿主前端入口不唯一')
+const hostSource = await readFile(resolve(assetsRoot, entry[0]), 'utf8')
+const bootMarker = 'const Ps=globalThis.dshDesktopBoot'
+if (!hostSource.includes(bootMarker) || !hostSource.includes('function mW()')) {
     throw new Error('宿主前端版本不匹配，不能构建隔离预览')
 }
-const hostModules = `${hostSource.slice(0, hostSource.indexOf(bootMarker))}\nglobalThis.previewModules=dV();`
+const hostModules = `${hostSource.slice(0, hostSource.indexOf(bootMarker))}\nglobalThis.previewModules=Object.fromEntries(mW().filter(module=>['react','react-dom/client'].includes(module.id)).map(module=>[module.id,module.factory()]));`
 let override = {}
 const row = { options: { id: 'sleep-memory' } }
-const harness = createHarness({}, { get: (key) => key === 'configEditor' ? {
+const previewConfig = { feedbackEnabled: true, recallPlanMode: 'local', autoLearnEnabled: false, recallReviewEnabled: false }
+const harness = createHarness(previewConfig, { get: (key) => key === 'configEditor' ? {
     entries: () => [row],
-    configuration: () => [{ entry: row, inherited: {}, override }],
+    configuration: () => [{ entry: row, inherited: previewConfig, override }],
     edit: async (_row, updater) => { override = updater() },
 } : key === 'workspaceRegistry' ? {
     list: () => [{ id: 'preview', title: '隔离验收项目', sessionIds: ['preview-session'] }],
@@ -30,6 +33,7 @@ await harness.table.put('smm_preview_emotion', fixture('smm_preview_emotion', {
     content: '上次发布前遗漏备份导致回滚困难，应在同类发布前核对备份与恢复步骤。',
     tags: ['发布经验'], source: { kind: 'model', confirmed: false },
 }))
+await harness.call('memory_recall', { query: 'Liquibase', projectId: 'workspace:preview' })
 const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>记忆银行隔离验收</title><style>
 :root{--dsw-alias-bg-base:#f8f9fb;--dsw-alias-bg-layer-1:#fff;--dsw-alias-bg-layer-2:#edf0f5;

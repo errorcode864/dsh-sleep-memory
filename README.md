@@ -180,6 +180,14 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 `Spring Boot 3.2.11` 也不会被仅描述 `3.2.12` 的记忆替代。
 显式召回的 `retrieval` 字段会解释命中的词、实体与查询覆盖度。
 
+### 本地检索与学习闭环（可选）
+
+不外接嵌入模型，不引入向量服务；本地分词缓存复用已有分析结果。
+`recallPlanMode: "shadow"` 只比较候选，`"local"` 启用强词与覆盖度筛选，可通过 `recallAliases` 配置项目术语。
+`learningPolicyMode: "evidence"` 支持短偏好证据与跨重载学习去重。
+`feedbackEnabled` 在原文详情提供有用、无关、错误、过时和撤回入口，`feedbackRankingEnabled` 单独控制有限排序调整。
+新增模式默认关闭或保持旧策略，具体配置与验证边界见[本地检索、学习与反馈](docs/guides/reliability.md#本地检索学习与反馈)。
+
 ### 语义扩展召回（可选）
 
 `semanticRecallEnabled` 开启后，注入路径先用 LLM 把查询改写成检索词（近义词、英文
@@ -206,6 +214,10 @@ sleep-memory/
 ├── memory-runtime.js       # 睡眠、评分、召回管线
 ├── memory-intelligence.js  # 后台知识提取、证据校验与召回审核
 ├── memory-retrieval.js     # 中文词级分析、技术实体保护与加权检索
+├── memory-search-index.js  # 逐条分词缓存与范围内词频
+├── memory-query-plan.js    # 本地强词筛选与项目术语通道
+├── memory-learning-jobs.js # 已验证候选持久化与恢复
+├── memory-feedback.js     # 实际呈现与明确用户反馈
 ├── memory-management.js    # memory_manage 工具实现
 ├── eval.mjs / smoke.mjs    # 检索基线 / 冒烟测试
 ├── locale/                 # 插件管理页双语标题与描述
@@ -267,7 +279,7 @@ sleep-memory/
   候选召回仍依赖词面或可选查询扩展，审核无法找回未进入候选集的记忆。
   没有项目范围时只允许自主学习用户偏好，避免项目知识污染全局；项目知识需先建立工作区或会话绑定。
 - 存储没有跨记录事务；睡眠或导入发生 I/O 错误时可能部分完成，需核对错误与库存。
-- JSON 备份仅包含记忆与有效性，不含本机会话绑定、调度及配置；跨机器需要重新绑定项目。
+- JSON 备份仅包含记忆与有效性，不含本机会话绑定、调度、学习任务、反馈及配置；跨机器需要重新绑定项目。
 
 ---
 
