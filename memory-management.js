@@ -106,6 +106,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         return {
             action: 'get', record, current: view.isCurrent(record), replacedBy: view.replacedBy.get(record.id) ?? null,
             recollectionVersion: recollectionVersion(record, view),
+            narrativeEnabled: cfg.narrativeEnabled,
             ...(feedback ? { outcomeEvidenceVersion: outcomeMemoryVersion(record, view.lifecycleOf(record)) } : {}),
             ...(record.layer === 'deep' ? { summaryVersion: {
                 previousId: revision?.target ?? null, nextId: view.summaryReplacedBy.get(record.id) ?? null,

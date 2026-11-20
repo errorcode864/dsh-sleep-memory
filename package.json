@@ -8,7 +8,8 @@
     "bench:search": "node tests/search-benchmark.mjs",
     "eval:model": "node tests/live-model-eval.mjs",
     "eval:preferences": "node tests/preference-eval.mjs",
-    "eval:evidence": "node tests/recall-evidence-eval.mjs"
+    "eval:evidence": "node tests/recall-evidence-eval.mjs",
+    "eval:narrative": "node tests/narrative-eval.mjs"
   },
   "repository": {
     "type": "git",
@@ -44,6 +45,7 @@
     "memory-recall-evidence.js",
     "memory-outcomes.js",
     "memory-recollection.js",
+    "memory-narrative.js",
     "memory-triggers.js",
     "memory-retrieval.js",
     "memory-search-index.js",

@@ -123,7 +123,7 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 16)
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 17)
         for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固', '按需逐层取证', '结果激励与警示']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
@@ -635,6 +635,54 @@ test('回忆面板按版本读取片段并对照原文，展开与过期拒绝�
         flatten(tree).find((node) => node.children.includes('刷新底稿后重试')).props.onClick()
         await flushTasks()
         assert.equal((await host.api.getRecord({ id: 'smm_recollection_ui' })).record.content, '需要重新核对的新底稿。')
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('叙述面板经真实 Remote 生成草稿并由用户确认保存及撤回', async () => {
+    const host = createHarness({ narrativeEnabled: true }, { llm: {
+        prepareCall: async () => ({ config: {}, stream: async function* (request) {
+            const input = JSON.parse(request.messages[1].content[0].text)
+            yield { type: 'text-delta', text: JSON.stringify(input.reflections
+                ? { accepted: true, reason: '保留失败结果及原文条件。' }
+                : { reflections: [{ quote: input.source, text: '或许可以在下一次演练前再次核对条件。' }] }) }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+        } }),
+    } })
+    await host.table.put('smm_narrative_ui', fixture('smm_narrative_ui', { kind: 'experience', content: '演练未成功，不得直接上线。' }))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const rowNode = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        let row = await client.render(rowNode.type, rowNode.props)
+        flatten(row).find((node) => node.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        row = await client.render(rowNode.type, rowNode.props)
+        const panel = flatten(row).find((node) => node.type?.name === 'NarrativePanel')
+        let tree = await client.render(panel.type, panel.props)
+        for (const [label, value] of [['叙述模型服务 ID', 'mock'], ['叙述模型 ID', 'mock']]) {
+            flatten(tree).find((node) => node.props['aria-label'] === label).props.onChange({ target: { value } })
+            tree = await client.render(panel.type, panel.props)
+        }
+        flatten(tree).find((node) => node.children.includes('生成反思草稿（2 次模型调用）')).props.onClick()
+        await flushTasks()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.props['aria-label'] === '待确认叙述草稿'))
+        assert.equal(host.domains.get('memory_narratives').size, 0)
+        flatten(tree).find((node) => node.children.includes('核对原文后保存反思')).props.onClick()
+        await flushTasks()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.equal(host.domains.get('memory_narratives').size, 1)
+        assert.ok(flatten(tree).some((node) => node.children.includes('原文引文：演练未成功，不得直接上线。')))
+        flatten(tree).find((node) => node.children.includes('撤回此叙述版本')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.some((value) => typeof value === 'string' && value.includes('已撤回'))))
+        assert.equal(host.table.get('smm_narrative_ui').content, '演练未成功，不得直接上线。')
+        assert.ok(client.calls.some((entry) => entry.args[0]?.action === 'narrativeDraft' && entry.args[0].expectedVersion))
     } finally { client.dispose(); await host.dispose() }
 })
 

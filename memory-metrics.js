@@ -7,7 +7,7 @@ export function estimateTokens(text) {
 /** 统计只保留计数和记忆 ID，不保留用户问题与记忆正文。 */
 export function createMemoryMetrics() {
     const state = {
-        models: Object.fromEntries(['learning', 'review', 'expansion', 'scoring'].map((stage) => [stage, {
+        models: Object.fromEntries(['learning', 'review', 'expansion', 'scoring', 'narrative'].map((stage) => [stage, {
             calls: 0, failed: 0, durationMs: 0,
             reported: { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 0 },
             estimated: { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },

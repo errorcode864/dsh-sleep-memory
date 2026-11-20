@@ -500,3 +500,38 @@ try {
     assert.equal((await outcomeRestored.call('memory_recall', { query: '数据搬家' })).count, 0)
     console.log('结果反馈真实存储验收通过：重载后情境激励、v3 跨目录恢复及结果撤回一致。')
 } finally { await outcomeRestored.close() }
+
+const narrativeRoot = await mkdtemp(resolve(testRoot, 'host-narrative-'))
+const narrativeModel = { prepareCall: async () => ({ config: {}, stream: async function* (request) {
+    const input = JSON.parse(request.messages[1].content[0].text)
+    yield { type: 'text-delta', text: JSON.stringify(input.reflections
+        ? { accepted: true, reason: '未改变失败结果。' }
+        : { reflections: [{ quote: input.source, text: '或许应在下一次演练前再次核对恢复条件。' }] }) }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+} }) }
+const narrativeHost = startInstance({ narrativeEnabled: true, autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, narrativeRoot, narrativeModel)
+let narrativeId
+try {
+    const record = fixture('smm_host_narrative', { kind: 'experience', content: '演练失败，未获上线许可。', projectId: '甲' })
+    await narrativeHost.api.manage({ action: 'import', dryRun: false, backup: exportMemoryBackup(new Map([[record.id, record]])) })
+    const original = await narrativeHost.api.getRecord({ id: record.id })
+    const draft = await narrativeHost.api.manage({
+        action: 'narrativeDraft', id: record.id, projectId: '甲', expectedVersion: original.recollectionVersion,
+        requestId: '宿主草稿', style: 'gentle', provider: 'mock', model: 'mock',
+    })
+    narrativeId = draft.entry.id
+    await narrativeHost.api.manage({ action: 'narrativeConfirm', id: record.id, projectId: '甲', draftId: narrativeId })
+} finally { await narrativeHost.close() }
+const narrativeReloaded = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, narrativeRoot)
+try {
+    const history = await narrativeReloaded.api.manage({ action: 'narrativeHistory', id: 'smm_host_narrative', projectId: '甲' })
+    assert.equal(history.items[0].id, narrativeId)
+    assert.equal(history.items[0].applicable, true)
+    assert.equal((await narrativeReloaded.api.getRecord({ id: 'smm_host_narrative' })).record.content, '演练失败，未获上线许可。')
+    await narrativeReloaded.api.manage({ action: 'narrativeRetract', id: 'smm_host_narrative', projectId: '甲', versionId: narrativeId })
+} finally { await narrativeReloaded.close() }
+const narrativeRetracted = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, narrativeRoot)
+try {
+    assert.equal((await narrativeRetracted.api.manage({ action: 'narrativeHistory', id: 'smm_host_narrative', projectId: '甲' })).items[0].state, 'retracted')
+    console.log('叙述真实存储验收通过：确认落盘、关闭开关后重载读取及撤回再次重载一致。')
+} finally { await narrativeRetracted.close() }

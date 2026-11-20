@@ -147,6 +147,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 - **先摘要再读证据**：默认 `fidelity: "summary"` 返回相关原句和记忆 ID，省略内容时标注 `truncated`；`memory_manage get` 按 ID 读取完整原文、学习证据与纠正链，`recall` 和 `raw` 保留原有呈现方式。
 - **多层来源追溯**：`memory_manage traceSources` 按巩固关系展开来源路径，限制深度、条数和 Token 估算；原文弹窗可逐层展开和单独读取完整证据，详见[来源追溯说明](docs/decisions/memory-source-tracing.md)。
 - **回忆与原文对照**：`memory_manage recollect` 提供按年龄收缩的经历片段、更多细节与完整底稿；事实、偏好和显著记忆保留全文，省略范围与版本均可核对，详见[回忆视图](docs/decisions/memory-recollection.md)。
+- **可选反思叙述**：开启 `narrativeEnabled` 后可在原文弹窗生成、核对并保存独立反思版本；原文完整保留，推断不进入事实召回，详见[叙述实验](docs/decisions/memory-narrative.md)。
 - **消耗可见**：运行详情分别统计学习、审核、查询扩展和情绪评分的模型实报 Token 与字符估算，自动注入同时受字符预算和 Token 估算预算限制。
 
 ### 睡眠整理（memory_sleep）
@@ -319,6 +320,8 @@ sleep-memory/
 | `recallDiagnosticsEnabled` | true | 最近 20 次召回的阶段诊断，不改变候选和排序 |
 | `preferenceRecallEnabled` | false | 普通任务应用语言、详略和格式偏好 |
 | `outcomeRecallEnabled` | false | 按用户确认的实际结果补充情境激励与警示，要求开启反馈记录 |
+| `narrativeEnabled` | false | 管理面板按需生成反思草稿，经模型复核与用户确认保存独立版本 |
+| `narrativeTimeoutMs` | 15000 | 叙述生成与复核各自的调用时限，单位毫秒，最大 60000 |
 | `recallReviewTimeoutMs` | 15000 | 召回审核等待上限，单位毫秒，已有显式值继续生效 |
 | `recallReviewCacheSeconds` | 0 | 同会话审核缓存有效秒数，0 关闭，最多 300 秒、128 项 |
 | `recallCandidateBudget` | 12 | 审核前的直接候选数量，与最终注入预算分开 |

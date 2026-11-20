@@ -39,6 +39,7 @@ import { awakenedRecord, isDormant } from './memory-access.js'
 import { matchPreferenceContext, planResponsePreferences } from './memory-preferences.js'
 import { planReconsolidation } from './memory-reconsolidation.js'
 import { createRecallEvidence } from './memory-recall-evidence.js'
+import { createNarrativeStore, narrativeDomainSpec } from './memory-narrative.js'
 import { outcomeNote } from './memory-outcomes.js'
 import { matchRecallTriggers, RECALL_TRIGGERS_SCHEMA } from './memory-triggers.js'
 import {
@@ -228,6 +229,8 @@ function resolveConfig(raw) {
   booleanField('recallDiagnosticsEnabled', true)
   booleanField('preferenceRecallEnabled', false)
   booleanField('outcomeRecallEnabled', false)
+  booleanField('narrativeEnabled', false)
+  numberField('narrativeTimeoutMs', 'integer', 500, 60_000, 15_000)
   booleanField('progressiveRecallEnabled', false)
   numberField('recallEvidenceMaxDepth', 'integer', 1, 8, 3)
   numberField('recallEvidenceMaxNodes', 'integer', 1, 100, 20)
@@ -1472,6 +1475,8 @@ const GUI_CONFIG_FIELDS = [
   { key: 'recallDiagnosticsEnabled', type: 'boolean' },
   { key: 'preferenceRecallEnabled', type: 'boolean' },
   { key: 'outcomeRecallEnabled', type: 'boolean' },
+  { key: 'narrativeEnabled', type: 'boolean' },
+  { key: 'narrativeTimeoutMs', type: 'integer', min: 500, max: 60000 },
   { key: 'semanticRecallEnabled', type: 'boolean' },
   { key: 'recallPlanMode', type: 'string' },
   { key: 'learningPolicyMode', type: 'string' },
@@ -1680,7 +1685,8 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['get', 'recollect', 'traceSources', 'correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
+    if (!input || !['get', 'recollect', 'traceSources', 'correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats',
+      'narrativeDraft', 'narrativeConfirm', 'narrativeHistory', 'narrativeRetract'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1834,6 +1840,7 @@ export function apply(ctx, config) {
       progressiveRecallEnabled: cfg.progressiveRecallEnabled, recallEvidenceLimits: recallEvidence.limits,
       recallDiagnosticsEnabled: cfg.recallDiagnosticsEnabled, preferenceRecallEnabled: cfg.preferenceRecallEnabled,
       outcomeRecallEnabled: cfg.outcomeRecallEnabled,
+      narrativeEnabled: cfg.narrativeEnabled, narrativeTimeoutMs: cfg.narrativeTimeoutMs, narrative: narratives.state,
       recallReviewTimeoutMs: cfg.recallReviewTimeoutMs, recallReviewCacheSeconds: cfg.recallReviewCacheSeconds,
     })
   }
@@ -1872,6 +1879,7 @@ export function apply(ctx, config) {
   const learningDomainPromise = cfg.autoLearnEnabled && cfg.learningPolicyMode === 'evidence'
     ? ctx.storageDomain.open(learningJobsDomainSpec(parseStoredRecord)) : null
   const feedbackDomainPromise = ctx.storageDomain.open(feedbackDomainSpec)
+  const narrativeDomainPromise = ctx.storageDomain.open(narrativeDomainSpec)
   const auditSpec = sleepAuditDomainSpec(parseStoredRecord)
   const auditDomainPromise = ctx.storageDomain.open(auditSpec)
   const backupDomainPromise = ctx.storageDomain.open(backupStateDomainSpec(parseStoredRecord, auditSpec.tables.records.valueSchema.parse))
@@ -1912,6 +1920,7 @@ export function apply(ctx, config) {
   runtimeDomainPromise.catch(() => {})
   learningDomainPromise?.catch(() => {})
   feedbackDomainPromise?.catch(() => {})
+  narrativeDomainPromise.catch(() => {})
   auditDomainPromise.catch(() => {})
   backupDomainPromise.catch(() => {})
   ctx.effect(() => async () => {
@@ -1919,10 +1928,11 @@ export function apply(ctx, config) {
     clearTimeout(scheduleTimer)
     for (const controller of controllers) controller.abort()
     await intelligence.drain()
+    await narratives.drain()
     await mutations
     await audit.drain()
     await backup.drain()
-    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise, auditDomainPromise, backupDomainPromise].filter(Boolean))
+    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise, narrativeDomainPromise, auditDomainPromise, backupDomainPromise].filter(Boolean))
     for (const domain of domains) if (domain.status === 'fulfilled') await domain.value.close()
   })
 
@@ -1950,6 +1960,10 @@ export function apply(ctx, config) {
     learningJobs: learningDomainPromise ? () => learningDomainPromise.then((domain) => domain.table('records')) : null,
   })
   Object.assign(runtime, intelligence.state)
+  const narratives = createNarrativeStore({
+    cfg, records, withMutation, generate: intelligence.narrate, isDisposed: () => disposed,
+    openNarratives: () => narrativeDomainPromise.then((domain) => domain.table('records')),
+  })
   const manageScope = async (args, contextSessionId) => {
     const sessionId = args.sessionId ?? contextSessionId
     if (sessionId !== null && sessionId !== undefined && !isSessionId(sessionId)) {
@@ -2030,7 +2044,8 @@ export function apply(ctx, config) {
     workspaceScopes,
     runSleepCycle: (dryRun) => runMemorySleep(dryRun),
     status, scope: (args) => withMutation(() => manageScope(args)),
-    manage: (args) => withMutation(() => manageExtended(args, undefined, true)),
+    manage: (args) => ['narrativeDraft', 'narrativeConfirm', 'narrativeHistory', 'narrativeRetract'].includes(args.action)
+      ? narratives.execute(args) : withMutation(() => manageExtended(args, undefined, true)),
   })
 
   // ---- memory_write -------------------------------------------------------
@@ -2802,7 +2817,7 @@ export function apply(ctx, config) {
           }
           const report = await runSleepCycle(await records(), cfg, {
             dryRun, audit: cfg.sleepAuditEnabled ? audit : null,
-            protectedIds: outcomeMemoryReferences((await feedbackDomainPromise).table('records').entries()),
+            protectedIds: new Set([...outcomeMemoryReferences((await feedbackDomainPromise).table('records').entries()), ...await narratives.references()]),
           })
           if (!dryRun) {
             const nextState = {
@@ -3017,6 +3032,9 @@ export function apply(ctx, config) {
         // 包括概要级联在内都不能破坏纠正链，避免悬空来源或旧事实复活。
         if ([...outcomeMemoryReferences((await feedbackDomainPromise).table('records').entries())].some((id) => doomedIds.has(id))) {
           return { code: 'conflict', message: '该记忆关联结果反馈的历史证据，请通过有效性管理停用并保留原文' }
+        }
+        if ([...await narratives.references()].some((id) => doomedIds.has(id))) {
+          return { code: 'conflict', message: '该记忆是叙述历史的底稿，请通过有效性管理停用并保留原文' }
         }
         if ([...table.entries()].some(([, record]) => record.replaces
           && (doomedIds.has(record.id) || doomedIds.has(record.replaces)))) {
@@ -3409,7 +3427,7 @@ export function apply(ctx, config) {
   }).catch((error) => { console.error('[sleep-memory] 睡眠调度初始化失败', error) })
 }
 
-/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, reconsolidationEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, outcomeRecallEnabled: boolean, progressiveRecallEnabled: boolean, recallEvidenceMaxDepth: number, recallEvidenceMaxNodes: number, recallEvidenceMaxEstimatedTokens: number, recallReviewTimeoutMs: number, recallReviewCacheSeconds: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
+/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, reconsolidationEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, outcomeRecallEnabled: boolean, narrativeEnabled: boolean, narrativeTimeoutMs: number, progressiveRecallEnabled: boolean, recallEvidenceMaxDepth: number, recallEvidenceMaxNodes: number, recallEvidenceMaxEstimatedTokens: number, recallReviewTimeoutMs: number, recallReviewCacheSeconds: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
 /** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number, reason?: string}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, access?: {state: 'awake'|'dormant', at: number, reason: string, lastWake?: {at: number, via: 'context'|'association', fromId?: string, hops?: number}}, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
 /** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */

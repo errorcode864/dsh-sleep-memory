@@ -827,6 +827,7 @@ window.__ModuleLoader__.load({
                       `${formatRuntimeTime(detail.record.access.lastWake.at)} · ${detail.record.access.lastWake.via === 'context' ? '情境条件' : `关联 ${detail.record.access.lastWake.fromId} · ${detail.record.access.lastWake.hops} 跳`}`)) : null),
                   detail.replacedBy ? h('p', { className: 'sm-runtime-note' }, `替代记忆：${detail.replacedBy}`) : null),
                 h(RecollectionPanel, { key: detail.recollectionVersion, detail, onRefresh: () => void loadDetail() }),
+                h(NarrativePanel, { key: `narrative-${detail.recollectionVersion}`, detail }),
                 h('section', { className: 'sm-record-section', 'aria-label': '来源信息' },
                   h('h3', null, '来源信息'),
                   h('dl', { className: 'sm-runtime-info' },
@@ -908,6 +909,93 @@ window.__ModuleLoader__.load({
                                         title: `${range.included ? '呈现' : '省略'} [${range.start}, ${range.end})` },
                                     detail.record.content.slice(range.start, range.end)))),
                         recollection.omitted.length ? h('p', null, `省略范围：${recollection.omitted.map((range) => `[${range.start}, ${range.end})`).join('、')}`) : h('p', null, '没有省略内容。'))) : null);
+        }
+
+        /** 反思草稿须用户核对后保存，已撤回版本仍保留历史。 */
+        function NarrativePanel({ detail }) {
+            const [form, setForm] = useState({ provider: '', model: '', style: 'reflective' });
+            const [draft, setDraft] = useState(null);
+            const [history, setHistory] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const requestId = useRef(null);
+            const eligible = detail.narrativeEnabled && detail.current && detail.record.kind === 'experience'
+                && detail.record.layer !== 'deep' && detail.record.learning?.category !== 'preference';
+            const readHistory = (offset = 0) => call('manage', {
+                action: 'narrativeHistory', id: detail.record.id, projectId: detail.record.projectId ?? null, offset, limit: 5,
+            });
+            const act = async (action, extra = {}) => {
+                setBusy(true);
+                setError('');
+                try {
+                    if (action === 'narrativeHistory') {
+                        setHistory(await readHistory(extra.offset ?? 0));
+                        return;
+                    }
+                    if (action === 'narrativeDraft' && !requestId.current) requestId.current = crypto.randomUUID();
+                    const result = await call('manage', {
+                        action, id: detail.record.id, projectId: detail.record.projectId ?? null,
+                        ...(action === 'narrativeDraft' ? { ...form, requestId: requestId.current, expectedVersion: detail.recollectionVersion } : extra),
+                    });
+                    if (action === 'narrativeDraft' && result.entry) {
+                        setDraft(result);
+                        return;
+                    }
+                    setDraft(null);
+                    requestId.current = null;
+                    setHistory(await readHistory());
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            const change = (key, value) => {
+                setForm((current) => ({ ...current, [key]: value }));
+                setDraft(null);
+                requestId.current = null;
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '可选叙述实验' },
+                h('h3', null, '可选叙述实验'),
+                h('p', { className: 'sm-runtime-note' }, '反思是模型推断；原文保持完整，确认保存不代表反思已成为事实。'),
+                eligible ? h('div', null,
+                    ...[['provider', '叙述模型服务 ID'], ['model', '叙述模型 ID']].map(([key, label]) =>
+                        h('label', { key }, label, h('input', { type: 'text', 'aria-label': label, value: form[key], maxLength: 200,
+                            disabled: busy, onChange: (event) => change(key, event.target.value) }))),
+                    h('p', { className: 'sm-runtime-note' }, '使用宿主已配置的模型服务与模型 ID；生成会将此条完整底稿发送给所选模型。'),
+                    h('label', null, '叙述风格', h('select', { 'aria-label': '叙述风格', value: form.style, disabled: busy,
+                        onChange: (event) => change('style', event.target.value) },
+                    h('option', { value: 'reflective' }, '平实反思'), h('option', { value: 'gentle' }, '温和反思'))),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy || !form.provider.trim() || !form.model.trim(),
+                        onClick: () => void act('narrativeDraft') }, '生成反思草稿（2 次模型调用）')) :
+                    h('p', { className: 'sm-runtime-note' }, detail.narrativeEnabled ? '仅当前原始经历可生成反思。' : '叙述实验未开启，可在插件配置页启用。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void act('narrativeHistory') }, '读取叙述历史'),
+                busy ? h('p', { role: 'status' }, '正在处理叙述…') : null,
+                error ? h('p', { className: 'sm-runtime-error', role: 'alert' }, error) : null,
+                draft ? h('div', { 'aria-label': '待确认叙述草稿' },
+                    h('p', null, '待确认草稿 · 模型推断 · 15 分钟内可保存'),
+                    ...draft.entry.reflections.map((item, index) => h('div', { key: index },
+                        h('blockquote', { className: 'sm-record-original' }, `原文：${item.quote}`), h('p', null, `反思：${item.text}`))),
+                    h('p', null, `模型复核：${draft.entry.reviewReason}`),
+                    h('button', { type: 'button', className: 'sm-btn', disabled: busy || !eligible,
+                        onClick: () => void act('narrativeConfirm', { draftId: draft.entry.id }) }, '核对原文后保存反思'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                        onClick: () => { setDraft(null); requestId.current = null; } }, '放弃此草稿')) : null,
+                history ? h('div', null,
+                    h('p', null, `叙述历史 · ${history.total} 个版本；现有 v1～v3 备份暂不包含这些解释版本。`),
+                    ...history.items.map((entry) => h('div', { key: entry.id, className: 'sm-record-history' },
+                        h('p', null, `${formatRuntimeTime(entry.createdAt)} · ${entry.style === 'gentle' ? '温和反思' : '平实反思'} · 模型推断 · ${entry.state === 'retracted' ? '已撤回' : entry.applicable ? '与当前底稿一致' : '底稿已变化或不可用'}`),
+                        h('code', null, entry.id),
+                        entry.previousId ? h('p', null, `上一叙述版本：${entry.previousId}`) : null,
+                        ...entry.reflections.map((item, index) => h('div', { key: index },
+                            h('blockquote', { className: 'sm-record-original' }, `原文引文：${item.quote}`), h('p', null, `反思：${item.text}`))),
+                        entry.state === 'confirmed' ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void act('narrativeRetract', { versionId: entry.id }) }, '撤回此叙述版本') : null)),
+                    history.offset > 0 ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void act('narrativeHistory', { offset: Math.max(0, history.offset - 5) }) }, '上一页叙述') : null,
+                    history.offset + history.limit < history.total ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void act('narrativeHistory', { offset: history.offset + 5 }) }, '下一页叙述') : null) : null);
         }
 
         /** 多层追溯按需读取且原文展开沿用同一项目范围。 */
@@ -1537,7 +1625,7 @@ window.__ModuleLoader__.load({
                       counterRow('本地检索规划', `${state.recallPlanMode ?? 'off'}；原候选 ${state.recallPlan?.last?.originalIds.length ?? 0} 条，规划候选 ${state.recallPlan?.last?.plannedIds.length ?? 0} 条`),
                       counterRow('持久反馈', `呈现 ${state.feedback?.exposures ?? 0} 条，反馈事件 ${state.feedback?.events ?? 0} 条，呈现保存失败 ${state.feedback?.failed ?? 0} 次；${state.feedback?.lastError ?? '无保存错误'}`),
                       ...Object.entries(state.metrics?.models ?? {}).map(([stage, usage]) => counterRow(
-                        { learning: '学习 Token', review: '审核 Token', expansion: '扩展 Token', scoring: '评分 Token' }[stage],
+                        { learning: '学习 Token', review: '审核 Token', expansion: '扩展 Token', scoring: '评分 Token', narrative: '叙述 Token' }[stage],
                         `模型实报 ${usage.reported.totalTokens}（缓存读取 ${usage.reported.cacheReadTokens}）；未实报调用估算 ${usage.estimated.totalTokens}；调用 ${usage.calls} 次，失败 ${usage.failed} 次，累计 ${usage.durationMs} 毫秒`)),
                       counterRow('注入 Token 估算', `${state.metrics?.injection.estimatedTokens ?? 0}；对应完整正文估算 ${state.metrics?.injection.sourceEstimatedTokens ?? 0}`),
                       counterRow('按需证据读取', `${state.metrics?.evidence.reads ?? 0} 次，输出估算 ${state.metrics?.evidence.estimatedTokens ?? 0} Token`),
@@ -1821,6 +1909,7 @@ window.__ModuleLoader__.load({
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'recallDiagnosticsEnabled', 'semanticRecallEnabled',
           'recallReviewTimeoutMs', 'recallReviewCacheSeconds',
+          'narrativeEnabled', 'narrativeTimeoutMs',
           'progressiveRecallEnabled', 'recallEvidenceMaxDepth', 'recallEvidenceMaxNodes', 'recallEvidenceMaxEstimatedTokens',
           'sleepAuditEnabled', 'contextualRecallEnabled',
           'sleepAuditMaxBytes',
@@ -1950,6 +2039,7 @@ window.__ModuleLoader__.load({
             ['recallDiagnosticsEnabled', '召回阶段诊断', '保存最近 20 次的阶段计数和原因；不保存问题与记忆正文'],
             ['preferenceRecallEnabled', '长期表达偏好应用', '普通任务按需使用语言、详略和格式偏好；当前明确要求优先'],
             ['outcomeRecallEnabled', '结果激励与警示', '需开启反馈记录；按用户确认的结果证据提醒同类情境，反例与撤回可改变提示'],
+            ['narrativeEnabled', '可选叙述实验', '默认关闭；原文弹窗按需生成模型反思，用户核对后保存独立解释版本'],
             ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
             ['feedbackEnabled', '记录召回与用户反馈', '按呈现版本保存反馈；曝光次数不代表认可'],
             ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],
@@ -2016,6 +2106,7 @@ window.__ModuleLoader__.load({
             ['injectMaxEstimatedTokens', '注入 Token 估算预算', '与字符预算同时生效，估算不等于模型计费 Token'],
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
             ['recallReviewTimeoutMs', '召回审核等待上限', '单位为毫秒，默认 15000；超时跳过注入，已有显式配置优先'],
+            ['narrativeTimeoutMs', '叙述单次调用时限', '单位为毫秒，生成与复核分别计时；默认 15000，最多 60000'],
             ['recallReviewCacheSeconds', '审核结果缓存时长', '单位为秒，0 关闭；仅同会话、问题、模型和候选版本一致时复用，最多 128 项'],
             ['recallEvidenceMaxDepth', '取证深度上限', '以本轮呈现的概要为起点，最多沿来源展开多少层'],
             ['recallEvidenceMaxNodes', '取证来源条数', '同轮多个概要共同使用，重复来源只计一次'],
