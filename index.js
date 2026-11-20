@@ -32,13 +32,14 @@ import { buildRetrievalIndex, retrievalTerms, scoreRetrieval } from './memory-re
 import { createLocalSearchIndex } from './memory-search-index.js'
 import { planLocalRecall } from './memory-query-plan.js'
 import { learningJobsDomainSpec } from './memory-learning-jobs.js'
-import { createFeedbackStore, feedbackDomainSpec } from './memory-feedback.js'
+import { createFeedbackStore, feedbackDomainSpec, outcomeMemoryReferences } from './memory-feedback.js'
 import { createSleepAudit, sleepAuditDomainSpec } from './memory-sleep-audit.js'
 import { backupStateDomainSpec, createMemoryBackup } from './memory-backup.js'
 import { awakenedRecord, isDormant } from './memory-access.js'
 import { matchPreferenceContext, planResponsePreferences } from './memory-preferences.js'
 import { planReconsolidation } from './memory-reconsolidation.js'
 import { createRecallEvidence } from './memory-recall-evidence.js'
+import { outcomeNote } from './memory-outcomes.js'
 import { matchRecallTriggers, RECALL_TRIGGERS_SCHEMA } from './memory-triggers.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
@@ -226,6 +227,7 @@ function resolveConfig(raw) {
   booleanField('recallReviewEnabled', true)
   booleanField('recallDiagnosticsEnabled', true)
   booleanField('preferenceRecallEnabled', false)
+  booleanField('outcomeRecallEnabled', false)
   booleanField('progressiveRecallEnabled', false)
   numberField('recallEvidenceMaxDepth', 'integer', 1, 8, 3)
   numberField('recallEvidenceMaxNodes', 'integer', 1, 100, 20)
@@ -244,6 +246,7 @@ function resolveConfig(raw) {
   }
   if (resolved.dormancyEnabled && !resolved.sleepAuditEnabled) problems.push('休眠功能要求同时开启 sleepAuditEnabled')
   if (resolved.reconsolidationEnabled && !resolved.sleepAuditEnabled) problems.push('深层再巩固要求同时开启 sleepAuditEnabled')
+  if (resolved.outcomeRecallEnabled && !resolved.feedbackEnabled) problems.push('结果激励与警示要求同时开启 feedbackEnabled')
   if (problems.length > 0) {
     throw new TypeError(`sleep-memory config rejected: ${problems.join('; ')}`)
   }
@@ -845,7 +848,7 @@ async function deleteMemoryRecords(table, ids) {
  * 决策基于调用开始时的表快照；调用方在同实例写队列内执行，避免并发覆盖。
  * @param {MemoryTable} table records 表句柄
  * @param {MemoryConfig} cfg
- * @param {{now?: number, dryRun?: boolean, audit?: ReturnType<typeof createSleepAudit> | null}} [options]
+ * @param {{now?: number, dryRun?: boolean, audit?: ReturnType<typeof createSleepAudit> | null, protectedIds?: Set<string>}} [options]
  * @returns {Promise<SleepReport>}
  */
 async function runSleepCycle(table, cfg, options = {}) {
@@ -888,7 +891,7 @@ async function runSleepCycle(table, cfg, options = {}) {
   for (const [id, rec] of live) {
     const idleDays = Math.round(((now - rec.lastAccessAt) / 86_400_000) * 10) / 10
     // 替代链的末端仍代表纠正结果，不能自动遗忘后让旧事实重新生效。
-    if (!options.audit && !cfg.dormancyEnabled && rec.layer === 'archive' && !rec.replaces && strengthOf(id, rec) <= cfg.archiveStrengthFloor
+    if (!options.audit && !options.protectedIds?.has(id) && !cfg.dormancyEnabled && rec.layer === 'archive' && !rec.replaces && strengthOf(id, rec) <= cfg.archiveStrengthFloor
       && idleDays > cfg.deleteArchiveAfterDays) {
       doomedIds.push(id)
       deletedList.push({ id, contentPreview: rec.content.slice(0, REPORT_PREVIEW_CHARS), idleDays })
@@ -1209,9 +1212,11 @@ async function runRecallCore(table, query, scope) {
       const triggers = cfg.contextualRecallEnabled ? matchRecallTriggers(rec, query) : []
       const contextualPreference = cfg.contextualRecallEnabled ? matchPreferenceContext(rec, query) : null
       const preference = preferences?.matches.get(rec.id) ?? contextualPreference
+      const outcome = scope.outcomeFeedback?.(rec, query, scope.projectId, view)
       if (triggers.length) score = Math.max(score, 1)
       if (preference) score = Math.max(score, 1)
-      const wake = isDormant(rec, cfg) && (triggers.length || contextualPreference) ? { via: 'context' } : null
+      if (outcome) score = Math.max(score, 1) * outcome.multiplier
+      const wake = isDormant(rec, cfg) && (triggers.length || contextualPreference || outcome) ? { via: 'context' } : null
       if (isDormant(rec, cfg) && !wake && !scope.includeDormant) score = 0
       if (rec.layer === 'salient' && rec.arousal !== null) {
         score *= 1 + cfg.salienceRecallBoost * rec.arousal
@@ -1231,6 +1236,7 @@ async function runRecallCore(table, query, scope) {
       }
       if (triggers.length) retrieval.triggers = triggers
       if (preference) retrieval.preference = preference
+      if (outcome) retrieval.outcome = outcome
       return { id, rec, score, thresholdScore, retrieval, ...(wake ? { wake } : {}) }
     })
     .filter((hit) => !isDormant(hit.rec, cfg) || hit.wake || scope.includeDormant)
@@ -1330,7 +1336,7 @@ function memoryLine(rec, cfg, query) {
 function recallBlockText(core, cfg, query, evidenceSession) {
   const lines = [
     ...core.ranked.map((hit) => `- ${memoryLine(hit.rec, cfg, query)}${hit.retrieval?.triggers?.length
-      ? `（情境线索：${hit.retrieval.triggers.map((trigger) => trigger.when).join('；')}）` : ''}${hit.retrieval?.preference ? '（表达偏好候选，当前要求优先）' : ''}${hit.wake ? '（从休眠记忆唤起）' : ''}`),
+      ? `（情境线索：${hit.retrieval.triggers.map((trigger) => trigger.when).join('；')}）` : ''}${hit.retrieval?.preference ? '（表达偏好候选，当前要求优先）' : ''}${hit.retrieval?.outcome ? outcomeNote(hit.retrieval.outcome) : ''}${hit.wake ? '（从休眠记忆唤起）' : ''}`),
     ...core.associated.map((found) => `- ${memoryLine(found.rec, cfg, query)}（由联想边带出${found.wake ? '；从休眠记忆唤起' : ''}）`),
   ]
   return [
@@ -1465,6 +1471,7 @@ const GUI_CONFIG_FIELDS = [
   { key: 'recallReviewCacheSeconds', type: 'integer', min: 0, max: 300 },
   { key: 'recallDiagnosticsEnabled', type: 'boolean' },
   { key: 'preferenceRecallEnabled', type: 'boolean' },
+  { key: 'outcomeRecallEnabled', type: 'boolean' },
   { key: 'semanticRecallEnabled', type: 'boolean' },
   { key: 'recallPlanMode', type: 'string' },
   { key: 'learningPolicyMode', type: 'string' },
@@ -1826,6 +1833,7 @@ export function apply(ctx, config) {
       reconsolidationEnabled: cfg.reconsolidationEnabled,
       progressiveRecallEnabled: cfg.progressiveRecallEnabled, recallEvidenceLimits: recallEvidence.limits,
       recallDiagnosticsEnabled: cfg.recallDiagnosticsEnabled, preferenceRecallEnabled: cfg.preferenceRecallEnabled,
+      outcomeRecallEnabled: cfg.outcomeRecallEnabled,
       recallReviewTimeoutMs: cfg.recallReviewTimeoutMs, recallReviewCacheSeconds: cfg.recallReviewCacheSeconds,
     })
   }
@@ -1863,7 +1871,7 @@ export function apply(ctx, config) {
   const runtimeDomainPromise = ctx.storageDomain.open(runtimeDomainSpec)
   const learningDomainPromise = cfg.autoLearnEnabled && cfg.learningPolicyMode === 'evidence'
     ? ctx.storageDomain.open(learningJobsDomainSpec(parseStoredRecord)) : null
-  const feedbackDomainPromise = cfg.feedbackEnabled ? ctx.storageDomain.open(feedbackDomainSpec) : null
+  const feedbackDomainPromise = ctx.storageDomain.open(feedbackDomainSpec)
   const auditSpec = sleepAuditDomainSpec(parseStoredRecord)
   const auditDomainPromise = ctx.storageDomain.open(auditSpec)
   const backupDomainPromise = ctx.storageDomain.open(backupStateDomainSpec(parseStoredRecord, auditSpec.tables.records.valueSchema.parse))
@@ -1875,6 +1883,7 @@ export function apply(ctx, config) {
   const backup = createMemoryBackup({
     openRecords: () => domainPromise.then((domain) => domain.table('records')),
     openAudit: () => auditDomainPromise.then((domain) => domain.table('records')),
+    openFeedback: () => feedbackDomainPromise.then((domain) => domain.table('records')),
     openState: () => backupDomainPromise.then((domain) => domain.table('records')),
     parseRecord: parseStoredRecord, parseAudit: auditSpec.tables.records.valueSchema.parse, maxRecords: cfg.maxRecords,
   })
@@ -1896,7 +1905,7 @@ export function apply(ctx, config) {
     }
     await reinforceHits(table, direct.filter((hit) => !awakening.includes(hit)), cfg, now)
   }
-  const feedback = feedbackDomainPromise
+  const feedback = cfg.feedbackEnabled
     ? createFeedbackStore(() => feedbackDomainPromise.then((domain) => domain.table('records'))) : null
   if (feedback) runtime.feedback = feedback.state
   domainPromise.catch(() => {})
@@ -1919,7 +1928,7 @@ export function apply(ctx, config) {
 
   // storage-domain 的 Domain 接口没有 tables 属性；表句柄须经 domain.table(name) 获取。
   const records = async () => {
-    await backup.recover()
+    if (await backup.recover()) await feedback?.reload()
     await audit.recover()
     return domainPromise.then((domain) => domain.table('records'))
   }
@@ -1979,19 +1988,25 @@ export function apply(ctx, config) {
       return recallEvidence.expand(args, scope.sessionId, scope.projectId, createRecordView([...table.entries()]))
     }
     if (['sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(args.action)) {
-      if (args.action !== 'sleepHistory' && args.action !== 'sleepStats') await backup.recover()
+      if (args.action !== 'sleepHistory' && args.action !== 'sleepStats' && await backup.recover()) await feedback?.reload()
       return audit.manage(args)
     }
-    if (args.action === 'export' && args.includeAudit === true) {
-      if (Object.keys(args).some((key) => !['action', 'includeAudit'].includes(key))) {
-        return { code: 'invalid_args', message: '审计备份导出参数包含未知字段' }
+    if (args.action === 'export' && (args.includeAudit === true || args.includeFeedback !== undefined)) {
+      if (Object.keys(args).some((key) => !['action', 'includeAudit', 'includeFeedback'].includes(key))
+        || (args.includeFeedback !== undefined && typeof args.includeFeedback !== 'boolean')
+        || args.includeAudit !== true) {
+        return { code: 'invalid_args', message: '反馈备份须同时开启 includeAudit，且导出选项须为布尔值' }
       }
       await records()
-      return { action: 'export', backup: await backup.export() }
+      return { action: 'export', backup: await backup.export(args.includeFeedback === true) }
     }
-    if (args.action === 'import' && args.backup?.version === 2) {
+    if (args.action === 'import' && [2, 3].includes(args.backup?.version)) {
+      // 恢复用户确认只能由用户操作授权以免模型通过备份伪造结果。
+      if (args.backup.version === 3 && !trustedFeedback) return { code: 'forbidden', message: '含用户反馈的备份仅允许在管理面板中预演并确认导入' }
       await records()
-      return backup.import(args)
+      const result = await backup.import(args)
+      if (result.importedFeedback) await feedback?.reload()
+      return result
     }
     return executeMemoryManagement(args, {
       table: await records(), cfg, parseRecord: parseStoredRecord, status,
@@ -2528,6 +2543,7 @@ export function apply(ctx, config) {
                 matchedEntities: { type: 'array', items: { type: 'string' } },
                 coverage: { type: 'number', description: '查询词覆盖率，0~1' },
                 expanded: { type: 'object' },
+                outcome: { type: 'object', description: '用户确认的情境结果、正反证据与有界排序乘数' },
               },
               required: ['matchedTerms', 'matchedEntities', 'coverage'],
             },
@@ -2619,6 +2635,7 @@ export function apply(ctx, config) {
         const { ranked, associated, totalCandidates, now } = await runRecallCore(table, query, {
           searchIndex, planState, trace,
           feedbackRanking: cfg.feedbackRankingEnabled ? feedback.ranking : null,
+          outcomeFeedback: cfg.outcomeRecallEnabled ? feedback.outcome : null,
           limit: args.limit ?? cfg.recallBudget,
           layerFilter,
           timeFilter,
@@ -2781,7 +2798,10 @@ export function apply(ctx, config) {
             scheduleState = { ...scheduleState, lastAttemptAt: now, retryAt: now + 60_000, lastError: '上次睡眠尚未确认完成' }
             await stateTable.put('schedule', scheduleState)
           }
-          const report = await runSleepCycle(await records(), cfg, { dryRun, audit: cfg.sleepAuditEnabled ? audit : null })
+          const report = await runSleepCycle(await records(), cfg, {
+            dryRun, audit: cfg.sleepAuditEnabled ? audit : null,
+            protectedIds: outcomeMemoryReferences((await feedbackDomainPromise).table('records').entries()),
+          })
           if (!dryRun) {
             const nextState = {
               ...scheduleState, lastSuccessAt: Date.now(), failures: 0, retryAt: null, lastError: null,
@@ -2911,6 +2931,7 @@ export function apply(ctx, config) {
         release: { type: 'boolean', description: 'bind 专用：true 释放显式绑定，回退工作区或配置' },
         batchId: { type: 'string', description: '睡眠审计批次 ID' },
         includeAudit: { type: 'boolean', description: 'export 可选：true 导出含睡眠审计的 v2 备份' },
+        includeFeedback: { type: 'boolean', description: 'export 可选：同时开启 includeAudit 时导出含用户反馈及结果的 v3 备份' },
       },
       required: ['action'],
     },
@@ -2987,6 +3008,9 @@ export function apply(ctx, config) {
           }
         }
         // 包括概要级联在内都不能破坏纠正链，避免悬空来源或旧事实复活。
+        if ([...outcomeMemoryReferences((await feedbackDomainPromise).table('records').entries())].some((id) => doomedIds.has(id))) {
+          return { code: 'conflict', message: '该记忆关联结果反馈的历史证据，请通过有效性管理停用并保留原文' }
+        }
         if ([...table.entries()].some(([, record]) => record.replaces
           && (doomedIds.has(record.id) || doomedIds.has(record.replaces)))) {
           return { code: 'conflict', message: '该记忆涉及事实纠正链，暂不支持逐条遗忘；可继续纠正并保留历史。' }
@@ -3265,6 +3289,7 @@ export function apply(ctx, config) {
           searchIndex, planState, trace,
           onPreferenceSuppressed: (record, lifecycle) => injectionTracker.allowNext(session, memoryVersion(record, lifecycle)),
           feedbackRanking: cfg.feedbackRankingEnabled ? feedback.ranking : null,
+          outcomeFeedback: cfg.outcomeRecallEnabled ? feedback.outcome : null,
           limit: cfg.recallReviewEnabled ? cfg.recallCandidateBudget : cfg.injectBudget,
           layerFilter: undefined, cfg, expandedTerms,
           minScore: cfg.injectMinScore, projectId: scope.projectId, automatic: true, exclude,
@@ -3301,6 +3326,8 @@ export function apply(ctx, config) {
             if (!approved.has(hit.rec.id)) return
             if (!current || !view.isRecallable(current, true)) { trace.skip('inactive'); return }
             if (memoryVersion(current, view.lifecycleOf(current), true) !== versions.get(current.id)) { trace.skip('version-changed'); return }
+            if (!isAssociated && cfg.outcomeRecallEnabled && JSON.stringify(feedback.outcome(current, queryText, scope.projectId, view))
+              !== JSON.stringify(hit.retrieval?.outcome ?? null)) { trace.skip('outcome-changed'); return }
             if (currentPreferences?.suppressed.has(current.id)) { trace.skip('preference-overridden'); return }
             if (exclude(current, view.lifecycleOf(current))) return
             if (!isAssociated && direct.length >= cfg.injectBudget) { trace.skip('count-budget'); return }
@@ -3375,7 +3402,7 @@ export function apply(ctx, config) {
   }).catch((error) => { console.error('[sleep-memory] 睡眠调度初始化失败', error) })
 }
 
-/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, reconsolidationEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, progressiveRecallEnabled: boolean, recallEvidenceMaxDepth: number, recallEvidenceMaxNodes: number, recallEvidenceMaxEstimatedTokens: number, recallReviewTimeoutMs: number, recallReviewCacheSeconds: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
+/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, reconsolidationEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, outcomeRecallEnabled: boolean, progressiveRecallEnabled: boolean, recallEvidenceMaxDepth: number, recallEvidenceMaxNodes: number, recallEvidenceMaxEstimatedTokens: number, recallReviewTimeoutMs: number, recallReviewCacheSeconds: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
 /** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number, reason?: string}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, access?: {state: 'awake'|'dormant', at: number, reason: string, lastWake?: {at: number, via: 'context'|'association', fromId?: string, hops?: number}}, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
 /** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */

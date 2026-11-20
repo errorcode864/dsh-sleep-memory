@@ -84,6 +84,7 @@ source_of_truth: code-and-script
 | `learningPolicyMode` | `current` | `evidence` 接受短证据并持久去重，`current` 保持已有策略 |
 | `feedbackEnabled` | `false` | 持久记录实际呈现及 GUI 用户反馈 |
 | `feedbackRankingEnabled` | `false` | 需同时开启反馈记录，同查询、范围和版本的反馈才调整排序 |
+| `outcomeRecallEnabled` | `false` | 需同时开启反馈记录，按明确结果与情境补充激励和警示 |
 
 模式、学习策略与反馈开关可在插件配置页编辑，术语表与覆盖度通过 profile 配置。
 示例中的项目 ID 必须与记忆归属一致，工作区范围通常为 `workspace:<workspaceId>`。
@@ -118,7 +119,12 @@ recallAliases:
 错误与过时反馈不自动改事实，核对后使用已有纠正或有效性管理。
 新版本不继承旧版本反馈，历史反馈仍可查看。
 
+实际成功或失败在“召回反馈 → 实际结果与证据”确认，先读取同项目原文再提交。
+开启结果召回后，同类情境使用有效证据，正反结果共同决定提示，撤回与纠正均可停止旧影响。
+具体计数、排序、确认边界与证据保留规则见[结果激励与警示](../decisions/memory-outcome-feedback.md)。
+
 默认 v1 备份不包含学习任务、反馈和审计；可选 [v2 备份](../decisions/memory-audit-backup.md)额外恢复睡眠审计。
+选择“下载含用户反馈的备份”生成 v3，包含实际呈现、普通反馈、结果和撤回历史。
 运行详情展示分词复用、候选差异和反馈计数，反馈总数为已加载持久资料，其他运行计数仍按本次加载统计。
 
 ```bash

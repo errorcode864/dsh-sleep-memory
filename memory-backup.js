@@ -1,4 +1,5 @@
 import { backupChecksum, exportMemoryBackup, planMemoryImport, stableJson } from './memory-contract.js'
+import { feedbackDomainSpec, planFeedbackImport } from './memory-feedback.js'
 
 /** 恢复计划独立保存以阻止读者看到跨域导入的中间状态。 */
 export function backupStateDomainSpec(parseRecord, parseAudit) {
@@ -12,18 +13,21 @@ export function backupStateDomainSpec(parseRecord, parseAudit) {
             }
             if (value.state === 'complete') return value
             if (!Array.isArray(value.records) || !Array.isArray(value.audits)
-                || value.checksum !== backupChecksum({ records: value.records, audits: value.audits })) {
+                || (value.feedback !== undefined && !Array.isArray(value.feedback))
+                || value.checksum !== backupChecksum({ records: value.records, audits: value.audits,
+                    ...(value.feedback !== undefined ? { feedback: value.feedback } : {}) })) {
                 throw new Error('备份恢复计划校验失败')
             }
             for (const record of value.records) parseRecord(record)
             for (const batch of value.audits) parseAudit(batch)
+            for (const item of value.feedback ?? []) feedbackDomainSpec.tables.records.valueSchema.parse(item)
             return value
         } } } },
     }
 }
 
 /** 记忆与审计统一导入且不覆盖同 ID 的本地异内容。 */
-export function createMemoryBackup({ openRecords, openAudit, openState, parseRecord, parseAudit, maxRecords }) {
+export function createMemoryBackup({ openRecords, openAudit, openFeedback, openState, parseRecord, parseAudit, maxRecords }) {
     let operations = Promise.resolve()
     let needsRecovery = true
     const serialize = (operation) => {
@@ -40,6 +44,7 @@ export function createMemoryBackup({ openRecords, openAudit, openState, parseRec
             return 0
         }
         const tables = [[await openRecords(), job.records], [await openAudit(), job.audits]]
+        if (job.feedback) tables.push([await openFeedback(), job.feedback])
         // 全部版本先核对以免恢复时覆盖期间新增的事实或审计。
         for (const [table, values] of tables) {
             for (const value of values) {
@@ -61,10 +66,17 @@ export function createMemoryBackup({ openRecords, openAudit, openState, parseRec
     return {
         recover: () => serialize(recoverPending),
         drain: () => operations,
-        export: () => serialize(async () => {
+        export: (includeFeedback = false) => serialize(async () => {
             await recoverPending()
             const records = exportMemoryBackup(await openRecords()).records
             const audits = [...(await openAudit()).entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, batch]) => batch)
+            if (includeFeedback) {
+                const feedback = [...(await openFeedback()).entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, item]) => item)
+                return {
+                    format: 'dsh-sleep-memory', version: 3, scope: 'memory-audit-and-feedback', exportedAt: Date.now(),
+                    records, audits, feedback, checksum: backupChecksum({ records, audits, feedback }),
+                }
+            }
             return {
                 format: 'dsh-sleep-memory', version: 2, scope: 'memory-and-sleep-audit',
                 exportedAt: Date.now(), records, audits, checksum: backupChecksum({ records, audits }),
@@ -81,16 +93,20 @@ export function createMemoryBackup({ openRecords, openAudit, openState, parseRec
             const backup = args.backup
             let recordPlan
             const pendingAudits = []
+            const pendingFeedback = []
             try {
-                if (!backup || backup.format !== 'dsh-sleep-memory' || backup.version !== 2
-                    || backup.scope !== 'memory-and-sleep-audit' || !Array.isArray(backup.audits)
+                if (!backup || backup.format !== 'dsh-sleep-memory' || ![2, 3].includes(backup.version)
+                    || backup.scope !== (backup.version === 3 ? 'memory-audit-and-feedback' : 'memory-and-sleep-audit') || !Array.isArray(backup.audits)
                     || backup.audits.length > 100_000
-                    || backup.checksum !== backupChecksum({ records: backup.records, audits: backup.audits })) {
+                    || backup.checksum !== backupChecksum({ records: backup.records, audits: backup.audits,
+                        ...(backup.version === 3 ? { feedback: backup.feedback } : {}) })) {
                     throw new Error('备份格式、范围或校验摘要不合法')
                 }
                 recordPlan = planMemoryImport(records, {
                     format: backup.format, version: 1, records: backup.records, checksum: backupChecksum(backup.records),
                 }, parseRecord, maxRecords)
+                if (backup.version === 3) pendingFeedback.push(...planFeedbackImport(await openFeedback(), backup.feedback,
+                    new Map([...records.entries(), ...recordPlan.pending.map((record) => [record.id, record])])))
                 const seen = new Set()
                 for (const batch of backup.audits) {
                     parseAudit(batch)
@@ -108,23 +124,29 @@ export function createMemoryBackup({ openRecords, openAudit, openState, parseRec
             const planToken = backupChecksum({
                 checksum: backup.checksum, records: recordPlan.pending.map((record) => record.id),
                 audits: pendingAudits.map((batch) => batch.id),
+                ...(backup.version === 3 ? { feedback: pendingFeedback.map((item) => item.id) } : {}),
             })
             const result = {
                 action: 'import', dryRun: args.dryRun !== false, planToken,
                 planned: recordPlan.pending.length, skipped: recordPlan.skipped,
                 plannedAudits: pendingAudits.length, skippedAudits: backup.audits.length - pendingAudits.length,
                 imported: 0, importedAudits: 0,
+                ...(backup.version === 3 ? {
+                    plannedFeedback: pendingFeedback.length, skippedFeedback: backup.feedback.length - pendingFeedback.length, importedFeedback: 0,
+                } : {}),
             }
             if (result.dryRun) return result
-            if (!recordPlan.pending.length && !pendingAudits.length) return result
+            if (!recordPlan.pending.length && !pendingAudits.length && !pendingFeedback.length) return result
             if (args.planToken !== planToken) return { code: 'confirmation_required', message: '请重新预演审计备份并提供 planToken' }
-            const payload = { records: recordPlan.pending, audits: pendingAudits }
+            const payload = { records: recordPlan.pending, audits: pendingAudits,
+                ...(backup.version === 3 ? { feedback: pendingFeedback } : {}) }
             needsRecovery = true
             await (await openState()).put('restore', {
                 id: 'restore', state: 'prepared', at: Date.now(), ...payload, checksum: backupChecksum(payload),
             })
             await recoverPending()
-            return { ...result, imported: result.planned, importedAudits: result.plannedAudits }
+            return { ...result, imported: result.planned, importedAudits: result.plannedAudits,
+                ...(backup.version === 3 ? { importedFeedback: result.plannedFeedback } : {}) }
         }),
     }
 }

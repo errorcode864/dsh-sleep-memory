@@ -448,3 +448,46 @@ try {
     assert.equal(expanded.items[0].id, 'smm_middle')
     console.log('逐层取证真实存储验收通过：自动入口、逐层读取、只读与重载重新召回一致。')
 } finally { await evidenceReloaded.close() }
+
+const outcomeRoot = await mkdtemp(resolve(testRoot, 'host-outcomes-'))
+const outcomeConfig = { autoLearnEnabled: false, recallReviewEnabled: false, sleepIntervalMinutes: 0, outcomeRecallEnabled: true }
+const outcomeHost = startInstance(outcomeConfig, {}, outcomeRoot)
+let outcomeBackup
+try {
+    const records = [
+        fixture('smm_practice', { content: '发布前先核验恢复能力。' }),
+        fixture('smm_result', { content: '恢复演练确认成功。' }),
+    ]
+    await outcomeHost.api.manage({ action: 'import', dryRun: false,
+        backup: exportMemoryBackup(new Map(records.map((record) => [record.id, record]))) })
+    const recalled = await outcomeHost.call('memory_recall', { query: '发布前先核验恢复能力', limit: 1 })
+    const proof = await outcomeHost.api.getRecord({ id: 'smm_result' })
+    await outcomeHost.api.manage({
+        action: 'feedback', eventId: '宿主成功结果', exposureId: recalled.hits[0].exposureId, signal: 'success',
+        outcome: {
+            trigger: { when: '准备迁移', cues: ['数据搬家'] }, action: '先验证恢复能力', result: '恢复演练成功',
+            evidence: { memoryId: 'smm_result', quote: proof.record.content, version: proof.outcomeEvidenceVersion },
+        },
+    })
+    outcomeBackup = (await outcomeHost.api.manage({ action: 'export', includeAudit: true, includeFeedback: true })).backup
+} finally { await outcomeHost.close() }
+const outcomeReloaded = startInstance(outcomeConfig, {}, outcomeRoot)
+try {
+    const recalled = await outcomeReloaded.call('memory_recall', { query: '数据搬家' })
+    assert.equal(recalled.hits[0].retrieval.outcome.direction, 'encouragement')
+} finally { await outcomeReloaded.close() }
+const outcomeRestoreRoot = await mkdtemp(resolve(testRoot, 'host-outcome-restore-'))
+const outcomeRestored = startInstance(outcomeConfig, {}, outcomeRestoreRoot)
+try {
+    const plan = await outcomeRestored.api.manage({ action: 'import', backup: outcomeBackup })
+    await outcomeRestored.api.manage({ action: 'import', backup: outcomeBackup, dryRun: false, planToken: plan.planToken })
+    const recalled = await outcomeRestored.call('memory_recall', { query: '数据搬家' })
+    assert.equal(recalled.hits[0].retrieval.outcome.evidence[0].memoryId, 'smm_result')
+    const detail = await outcomeRestored.api.getRecord({ id: 'smm_practice' })
+    const event = detail.exposures.flatMap((item) => item.outcomes)[0]
+    await outcomeRestored.api.manage({
+        action: 'feedback', eventId: '宿主撤回结果', exposureId: event.exposureId, signal: 'retract', retracts: event.eventId,
+    })
+    assert.equal((await outcomeRestored.call('memory_recall', { query: '数据搬家' })).count, 0)
+    console.log('结果反馈真实存储验收通过：重载后情境激励、v3 跨目录恢复及结果撤回一致。')
+} finally { await outcomeRestored.close() }

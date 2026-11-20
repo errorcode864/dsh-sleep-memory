@@ -3,6 +3,7 @@ import {
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
 import { traceMemorySources } from './memory-provenance.js'
+import { outcomeMemoryVersion } from './memory-outcomes.js'
 
 const EXTENDED_ACTIONS = ['get', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
 
@@ -13,7 +14,7 @@ export function isExtendedAction(action) {
 /** 扩展管理请求独立校验，沿用既有工具的错误返回协议。 */
 export async function executeMemoryManagement(args, { table, cfg, parseRecord, status, manageScope, feedback, trustedFeedback }) {
     if (args.action === 'feedback') return feedback
-        ? feedback.submit(args, trustedFeedback) : { code: 'disabled', message: '反馈记录尚未开启' }
+        ? feedback.submit(args, trustedFeedback, createRecordView([...table.entries()])) : { code: 'disabled', message: '反馈记录尚未开启' }
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
         traceSources: ['action', 'id', 'projectId', 'maxDepth', 'maxNodes', 'maxEstimatedTokens'],
@@ -90,11 +91,12 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         const revision = record.edges.find((edge) => edge.relation === 'revises')
         return {
             action: 'get', record, current: view.isCurrent(record), replacedBy: view.replacedBy.get(record.id) ?? null,
+            ...(feedback ? { outcomeEvidenceVersion: outcomeMemoryVersion(record, view.lifecycleOf(record)) } : {}),
             ...(record.layer === 'deep' ? { summaryVersion: {
                 previousId: revision?.target ?? null, nextId: view.summaryReplacedBy.get(record.id) ?? null,
                 reason: revision?.reason ?? null,
             } } : {}),
-            ...(feedback ? await feedback.detail(record, view.lifecycleOf(record), view.isCurrent(record)) : {}),
+            ...(feedback ? await feedback.detail(record, view.lifecycleOf(record), view.isCurrent(record), view) : {}),
             sources: ids.slice(offset, offset + limit).map((id) => table.get(id)).filter(Boolean),
             totalSources: ids.length, offset, limit,
             lifecycle: view.lifecycleOf(record), chainRoot: root.id,

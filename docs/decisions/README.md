@@ -22,6 +22,7 @@ source_of_truth: decision
 - [审核等待时限与短期结果缓存](memory-review-latency.md)
 - [深层概要跨批次再巩固](memory-reconsolidation.md)
 - [概要后的按需逐层取证](memory-progressive-recall.md)
+- [实际结果驱动的激励与警示](memory-outcome-feedback.md)
 - 已停止：[Embedding 混合检索草案](memory-hybrid-learning.md)
 - [文档索引](../README.md)
 
@@ -45,4 +46,5 @@ source_of_truth: decision
 | decision | [审核等待时限与短期结果缓存](memory-review-latency.md) | active | 2026-11-20 |
 | decision | [深层概要跨批次再巩固](memory-reconsolidation.md) | active | 2026-11-20 |
 | decision | [概要后的按需逐层取证](memory-progressive-recall.md) | active | 2026-11-20 |
+| decision | [实际结果驱动的激励与警示](memory-outcome-feedback.md) | active | 2026-11-20 |
 <!-- DOCS-INDEX:END -->

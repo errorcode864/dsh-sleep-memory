@@ -247,6 +247,12 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 范围、审核与预算继续生效，详细规则和评测边界见[召回诊断与长期表达偏好](docs/decisions/memory-recall-preferences.md)。
 配置页可调整审核时限和 `recallReviewCacheSeconds`，缓存默认关闭；开启后同会话、同问题、同版本候选可短期复用审核结果，见[审核等待与缓存](docs/decisions/memory-review-latency.md)。
 
+### 实际结果的激励与警示（可选）
+
+开启 `feedbackEnabled` 后，可在原文弹窗核对并确认成功或失败结果，关联情境、做法和原始证据。
+额外开启 `outcomeRecallEnabled`，同类情境会出现有证据的激励或警示；反例、纠正与撤回会调整提示。
+结果不由情绪分数推断，也不改写记忆强度；含反馈的 v3 备份可恢复结果历史，见[结果反馈说明](docs/decisions/memory-outcome-feedback.md)。
+
 ---
 
 ## 项目结构
@@ -311,6 +317,7 @@ sleep-memory/
 | `recallReviewEnabled` | true | 自动注入前审核任务相关性 |
 | `recallDiagnosticsEnabled` | true | 最近 20 次召回的阶段诊断，不改变候选和排序 |
 | `preferenceRecallEnabled` | false | 普通任务应用语言、详略和格式偏好 |
+| `outcomeRecallEnabled` | false | 按用户确认的实际结果补充情境激励与警示，要求开启反馈记录 |
 | `recallReviewTimeoutMs` | 15000 | 召回审核等待上限，单位毫秒，已有显式值继续生效 |
 | `recallReviewCacheSeconds` | 0 | 同会话审核缓存有效秒数，0 关闭，最多 300 秒、128 项 |
 | `recallCandidateBudget` | 12 | 审核前的直接候选数量，与最终注入预算分开 |
@@ -339,7 +346,7 @@ sleep-memory/
   候选召回主要依赖词面、情境规则或可选查询扩展，审核无法找回未进入候选集的记忆。
   没有项目范围时只允许自主学习用户偏好，避免项目知识污染全局；项目知识需先建立工作区或会话绑定。
 - 存储没有跨记录事务；睡眠或导入发生 I/O 错误时可能部分完成，需核对错误与库存。
-- JSON 备份仅包含记忆与有效性，不含本机会话绑定、调度、学习任务、反馈及配置；跨机器需要重新绑定项目。
+- v1 备份包含记忆，v2 增加睡眠审计，v3 再增加用户反馈与结果历史；均不含会话绑定、调度、学习任务及配置。
 
 ---
 

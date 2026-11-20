@@ -47,6 +47,7 @@ source_of_truth: code-and-script
 v2 包含全库原文、来源、纠正关系、情境条件与完整睡眠审计。
 不包含会话绑定、调度、学习任务、用户反馈、profile 配置或模型凭据。
 它是记忆与审计备份，不能作为完整 profile 迁移包。
+后续 D 新增可选 [v3 反馈备份](memory-outcome-feedback.md#持久历史与备份)，v1、v2 的范围保持不变。
 导出会先完成本地恢复，不输出 `prepared` 或 `rolling-back` 的待执行批次。
 
 ## 导入与中断恢复

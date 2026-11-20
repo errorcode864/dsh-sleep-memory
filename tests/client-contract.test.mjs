@@ -123,8 +123,8 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 15)
-        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固', '按需逐层取证']) {
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 16)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固', '按需逐层取证', '结果激励与警示']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
         assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
@@ -524,6 +524,65 @@ test('运行面板展示逐层取证计数及预算拒绝且不包含来源正�
         assert.ok(text.includes('请求 2 次，返回 1 条'))
         assert.ok(text.includes('取证拒绝：已展开'))
         assert.equal(text.includes('仅来源包含的私有细节'), false)
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('用户在面板读取原文后确认结果并撤回，v3 备份可预演恢复', async () => {
+    const host = createHarness({ feedbackEnabled: true, outcomeRecallEnabled: true, recallPlanMode: 'local' })
+    await host.table.put('smm_practice', fixture('smm_practice', { content: '迁移前检查恢复能力。' }))
+    await host.table.put('smm_proof', fixture('smm_proof', { content: '恢复演练成功。' }))
+    await host.call('memory_recall', { query: '迁移前检查恢复能力', limit: 1 })
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const row = flatten(page).find((node) => node.type?.name === 'RecordRow')
+        await client.render(client.components.get('main'), {}, true)
+        const loaded = await client.render(client.components.get('main'))
+        const recordRow = row ?? flatten(loaded).find((node) => node.type?.name === 'RecordRow' && node.props.item.id === 'smm_practice')
+        let detail = await client.render(recordRow.type, recordRow.props)
+        flatten(detail).find((node) => node.type === 'button' && node.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        detail = await client.render(recordRow.type, recordRow.props)
+        const feedback = flatten(detail).find((node) => node.type?.name === 'FeedbackPanel')
+        const feedbackTree = await client.render(feedback.type, feedback.props)
+        const panel = flatten(feedbackTree).find((node) => node.type?.name === 'OutcomePanel')
+        let tree = await client.render(panel.type, panel.props)
+        for (const [label, value] of [['适用情境', '迁移前核对'], ['情境线索', '数据搬家'], ['采用的做法', '先备份并验证恢复'],
+            ['实际结果', '恢复演练成功'], ['结果证据 ID', 'smm_proof']]) {
+            flatten(tree).find((node) => node.props['aria-label'] === label).props.onChange({ target: { value } })
+            tree = await client.render(panel.type, panel.props)
+        }
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('读取结果证据')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.includes('恢复演练成功。')))
+        const save = flatten(tree).find((node) => node.type === 'button' && node.children.includes('确认实际结果'))
+        assert.equal(save.props.disabled, false)
+        save.props.onClick()
+        await flushTasks()
+        const recalled = await host.call('memory_recall', { query: '数据搬家' })
+        assert.equal(recalled.hits[0].retrieval.outcome.direction, 'encouragement')
+        tree = await client.render(panel.type, { ...panel.props, detail: await host.api.getRecord({ id: 'smm_practice' }) })
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('撤回结果反馈')).props.onClick()
+        await flushTasks()
+        assert.equal((await host.call('memory_recall', { query: '数据搬家' })).count, 0)
+        const backupPanel = flatten(loaded).find((node) => node.type?.name === 'BackupPanel')
+        let backupTree = await client.render(backupPanel.type, backupPanel.props)
+        flatten(backupTree).find((node) => node.type === 'button' && node.children.includes('下载含用户反馈的备份')).props.onClick()
+        await flushTasks()
+        assert.ok(client.calls.some((call) => call.method === 'manage' && call.args[0].includeFeedback === true))
+        const { backup } = await host.api.manage({ action: 'export', includeAudit: true, includeFeedback: true })
+        flatten(backupTree).find((node) => node.props.type === 'file').props.onChange({
+            target: { files: [{ name: 'feedback.json', size: 1000, text: async () => JSON.stringify(backup) }] },
+        })
+        await flushTasks()
+        backupTree = await client.render(backupPanel.type, backupPanel.props)
+        flatten(backupTree).find((node) => node.type === 'button' && node.children.includes('预演导入')).props.onClick()
+        await flushTasks()
+        backupTree = await client.render(backupPanel.type, backupPanel.props)
+        flatten(backupTree).find((node) => node.type === 'button' && node.children.includes('确认导入')).props.onClick()
+        await flushTasks()
+        assert.ok(client.calls.some((call) => call.args[0]?.backup?.version === 3 && call.args[0].planToken))
     } finally { client.dispose(); await host.dispose() }
 })
 

@@ -951,7 +951,75 @@ window.__ModuleLoader__.load({
                 onClick: () => void submit(exposure, 'retract'),
               }, '撤回反馈') : null)))
               : h('p', { className: 'sm-runtime-note' }, '暂无实际呈现记录。'),
+            h(OutcomePanel, { detail, onChanged }),
             message ? h('p', { role: 'status' }, message) : null);
+        }
+
+        /** 用户核对原文后才能记录实际结果且撤回保留历史。 */
+        function OutcomePanel({ detail, onChanged }) {
+            const [exposureId, setExposureId] = useState(detail.exposures.find((item) => item.currentVersion)?.id ?? '');
+            const [signal, setSignal] = useState('success');
+            const [draft, setDraft] = useState({ when: '', cues: '', action: '', result: '', evidenceId: detail.record.id, quote: '' });
+            const [proof, setProof] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const run = async (action, event) => {
+                setBusy(true); setMessage('');
+                try {
+                    if (action === 'read') {
+                        const result = await call('manage', { action: 'get', id: draft.evidenceId, projectId: detail.record.projectId ?? null });
+                        setProof(result);
+                        setDraft((current) => ({ ...current, quote: result.record.content.slice(0, 500) }));
+                        return;
+                    }
+                    await call('manage', {
+                        action: 'feedback', eventId: crypto.randomUUID(),
+                        exposureId: event?.exposureId ?? exposureId, signal: action === 'retract' ? 'retract' : signal,
+                        ...(action === 'retract' ? { retracts: event.eventId } : { outcome: {
+                            trigger: { when: draft.when, cues: draft.cues.split(/[，,\n]/).map((cue) => cue.trim()).filter(Boolean) },
+                            action: draft.action, result: draft.result,
+                            evidence: { memoryId: draft.evidenceId, quote: draft.quote, version: proof.outcomeEvidenceVersion },
+                        } }),
+                    });
+                    setMessage(action === 'retract' ? '已撤回结果反馈。' : '已保存用户确认的实际结果。');
+                    onChanged();
+                } catch (error) { setMessage(`结果操作失败：${error.message}`); }
+                finally { setBusy(false); }
+            };
+            return h('details', { className: 'sm-management', 'aria-label': '实际结果与证据' },
+                h('summary', null, '实际结果与证据'),
+                h('p', null, '只确认已核对的实际结果；情绪分数、重复召回和模型自评不能代替结果证据。'),
+                h('label', null, '结果对应的呈现', h('select', {
+                    'aria-label': '结果对应的呈现', value: exposureId, disabled: busy,
+                    onChange: (event) => setExposureId(event.target.value),
+                }, h('option', { value: '' }, '选择当前版本的呈现'),
+                ...detail.exposures.filter((item) => item.currentVersion).map((item) =>
+                    h('option', { key: item.id, value: item.id }, `${formatRuntimeTime(item.at)} · ${item.projectId ?? '全局'}`)))),
+                h('label', null, '实际结果方向', h('select', {
+                    'aria-label': '实际结果方向', value: signal, disabled: busy, onChange: (event) => setSignal(event.target.value),
+                }, h('option', { value: 'success' }, '成功'), h('option', { value: 'failure' }, '失败'))),
+                ...[['when', '适用情境', 200], ['cues', '情境线索', 648], ['action', '采用的做法', 200],
+                    ['result', '实际结果', 300], ['evidenceId', '结果证据 ID', 200], ['quote', '证据原文引句', 500]].map(([key, label, maxLength]) =>
+                    h('label', { key }, label, h('textarea', {
+                        'aria-label': label, className: 'sm-search', rows: key === 'quote' ? 3 : 1,
+                        value: draft[key], maxLength, disabled: busy,
+                        onChange: (event) => { setDraft((current) => ({ ...current, [key]: event.target.value })); if (key === 'evidenceId') setProof(null); },
+                    }))),
+                h('p', { className: 'sm-runtime-note' }, '情境线索使用逗号分隔的具体短语；证据应为同项目的原始记录。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy || !draft.evidenceId,
+                    onClick: () => void run('read') }, '读取结果证据'),
+                proof ? h('p', { className: 'sm-record-original' }, proof.record.content) : null,
+                h('button', { type: 'button', className: 'sm-btn sm-btn-primary',
+                    disabled: busy || !proof || !exposureId || !draft.when || !draft.cues || !draft.action || !draft.result || !draft.quote,
+                    onClick: () => void run('submit') }, '确认实际结果'),
+                ...detail.exposures.flatMap((exposure) => (exposure.outcomes ?? []).map((event) =>
+                    h('div', { key: event.eventId, className: 'sm-record-history' },
+                        h('p', null, `${event.signal === 'success' ? '成功' : '失败'} · ${event.applicable ? '证据有效' : '历史版本或证据已变化'}`),
+                        h('p', null, `${event.outcome.trigger.when} · ${event.outcome.action} · ${event.outcome.result}`),
+                        h('p', null, `${event.outcome.evidence.memoryId}：「${event.outcome.evidence.quote}」`),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void run('retract', event) }, '撤回结果反馈')))),
+                message ? h('p', { role: 'status' }, message) : null);
         }
 
         /** 纠正前展示新旧正文，状态变更必须先取得服务端影响计划。 */
@@ -1084,11 +1152,12 @@ window.__ModuleLoader__.load({
                     if (revision === selection.current) setBackup(value);
                 } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
             };
-            const run = async (action, dryRun = true, includeAudit = false) => {
+            const run = async (action, dryRun = true, includeAudit = false, includeFeedback = false) => {
                 setBusy(true); setMessage('');
                 try {
                     if (action === 'export') {
-                        const result = await call('manage', { action, ...(includeAudit ? { includeAudit: true } : {}) });
+                        const result = await call('manage', { action, ...(includeAudit ? { includeAudit: true } : {}),
+                            ...(includeFeedback ? { includeFeedback: true } : {}) });
                         const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json;charset=utf-8' });
                         if (blob.size > MAX_BACKUP_BYTES) throw new Error('备份超过界面 10 MiB 限制，请使用管理工具导出');
                         const url = URL.createObjectURL(blob);
@@ -1096,13 +1165,13 @@ window.__ModuleLoader__.load({
                         link.href = url; link.download = `sleep-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
                         link.click();
                         setTimeout(() => URL.revokeObjectURL(url), 1000);
-                        setMessage(includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
+                        setMessage(includeFeedback ? '已生成记忆、审计与用户反馈备份。' : includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
                     } else {
                         const result = await call('manage', {
-                            action, backup, dryRun, ...(!dryRun && backup.version === 2 ? { planToken: plan.planToken } : {}),
+                            action, backup, dryRun, ...(!dryRun && [2, 3].includes(backup.version) ? { planToken: plan.planToken } : {}),
                         });
                         if (dryRun) setPlan(result);
-                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次。`); onChanged?.(); }
+                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次、${result.importedFeedback ?? 0} 条呈现与反馈。`); onChanged?.(); }
                     }
                 } catch (error) {
                     setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
@@ -1113,11 +1182,12 @@ window.__ModuleLoader__.load({
                 h('p', null, '备份包含全库历史与来源。导入先预演；同 ID 异内容会拒绝，发生 I/O 中断可用原文件重试。'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true) }, '下载记忆与审计备份'),
-                h('p', null, '审计备份保留回滚证据；会话绑定、调度、学习任务与用户反馈不包含在内。'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true) }, '下载含用户反馈的备份'),
+                h('p', null, 'v3 备份包含结果与撤回历史；会话绑定、调度和学习任务仍不包含在内。'),
                 h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
                 plan ? h('div', { role: 'status' },
-                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次，跳过 ${plan.skipped} 条记忆。`),
+                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次、${plan.plannedFeedback ?? 0} 条呈现与反馈，跳过 ${plan.skipped} 条记忆。`),
                     h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
                 message ? h('p', { role: 'status' }, message) : null);
         }
@@ -1395,7 +1465,7 @@ window.__ModuleLoader__.load({
                       'version-changed': '记忆版本已改变', 'turn-changed': '用户轮次已改变', 'count-budget': '条数预算不足', 'char-budget': '字符预算不足',
                       'token-budget': 'Token 预算不足', 'path-rejected': '关联路径未通过', 'audit-capacity': '审计容量不足',
                       'write-failed': '呈现前写入失败', 'pipeline-failed': '召回处理失败',
-                      'preference-overridden': '当前要求覆盖或偏好待裁决',
+                      'preference-overridden': '当前要求覆盖或偏好待裁决', 'outcome-changed': '结果反馈或证据已变化',
                     }[reason] ?? reason} ${count}`).join('；') || '已通过本次筛选') : null))),
               h('div', { className: 'sm-runtime-counts' },
                 h('h3', null, '本次加载'),
@@ -1703,7 +1773,7 @@ window.__ModuleLoader__.load({
           'sleepAuditEnabled', 'contextualRecallEnabled',
           'sleepAuditMaxBytes',
           'dormancyEnabled', 'reconsolidationEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
-          'preferenceRecallEnabled',
+          'preferenceRecallEnabled', 'outcomeRecallEnabled',
           'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
@@ -1827,6 +1897,7 @@ window.__ModuleLoader__.load({
             ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
             ['recallDiagnosticsEnabled', '召回阶段诊断', '保存最近 20 次的阶段计数和原因；不保存问题与记忆正文'],
             ['preferenceRecallEnabled', '长期表达偏好应用', '普通任务按需使用语言、详略和格式偏好；当前明确要求优先'],
+            ['outcomeRecallEnabled', '结果激励与警示', '需开启反馈记录；按用户确认的结果证据提醒同类情境，反例与撤回可改变提示'],
             ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
             ['feedbackEnabled', '记录召回与用户反馈', '按呈现版本保存反馈；曝光次数不代表认可'],
             ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],

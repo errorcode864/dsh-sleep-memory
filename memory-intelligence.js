@@ -202,6 +202,7 @@ export function createMemoryIntelligence({ ctx, cfg, records, resolveScope, with
                     source: rec.source?.kind ?? 'unknown',
                     ...(retrieval?.triggers?.length ? { triggerConditions: retrieval.triggers } : {}),
                     ...(retrieval?.preference ? { preferenceContext: retrieval.preference } : {}),
+                    ...(retrieval?.outcome ? { outcomeContext: retrieval.outcome } : {}),
                 })),
             }
             // 完整问题与候选版本参与键计算以防摘要截断掩盖条件变化。
