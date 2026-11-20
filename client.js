@@ -983,7 +983,7 @@ window.__ModuleLoader__.load({
                     h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
                         onClick: () => { setDraft(null); requestId.current = null; } }, '放弃此草稿')) : null,
                 history ? h('div', null,
-                    h('p', null, `叙述历史 · ${history.total} 个版本；现有 v1～v3 备份暂不包含这些解释版本。`),
+                    h('p', null, `叙述历史 · ${history.total} 个版本；请在备份恢复中下载含叙述历史的 v4 备份。`),
                     ...history.items.map((entry) => h('div', { key: entry.id, className: 'sm-record-history' },
                         h('p', null, `${formatRuntimeTime(entry.createdAt)} · ${entry.style === 'gentle' ? '温和反思' : '平实反思'} · 模型推断 · ${entry.state === 'retracted' ? '已撤回' : entry.applicable ? '与当前底稿一致' : '底稿已变化或不可用'}`),
                         h('code', null, entry.id),
@@ -1292,12 +1292,12 @@ window.__ModuleLoader__.load({
                     if (revision === selection.current) setBackup(value);
                 } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
             };
-            const run = async (action, dryRun = true, includeAudit = false, includeFeedback = false) => {
+            const run = async (action, dryRun = true, includeAudit = false, includeFeedback = false, includeNarratives = false) => {
                 setBusy(true); setMessage('');
                 try {
                     if (action === 'export') {
                         const result = await call('manage', { action, ...(includeAudit ? { includeAudit: true } : {}),
-                            ...(includeFeedback ? { includeFeedback: true } : {}) });
+                            ...(includeFeedback ? { includeFeedback: true } : {}), ...(includeNarratives ? { includeNarratives: true } : {}) });
                         const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json;charset=utf-8' });
                         if (blob.size > MAX_BACKUP_BYTES) throw new Error('备份超过界面 10 MiB 限制，请使用管理工具导出');
                         const url = URL.createObjectURL(blob);
@@ -1305,14 +1305,16 @@ window.__ModuleLoader__.load({
                         link.href = url; link.download = `sleep-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
                         link.click();
                         setTimeout(() => URL.revokeObjectURL(url), 1000);
-                        setMessage(includeFeedback ? '已生成记忆、审计与用户反馈备份。' : includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
-                    } else {
-                        const result = await call('manage', {
-                            action, backup, dryRun, ...(!dryRun && [2, 3].includes(backup.version) ? { planToken: plan.planToken } : {}),
-                        });
-                        if (dryRun) setPlan(result);
-                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次、${result.importedFeedback ?? 0} 条呈现与反馈。`); onChanged?.(); }
+                        setMessage(includeNarratives ? '已生成包含叙述版本与撤回状态的 v4 备份。' : includeFeedback ? '已生成记忆、审计与用户反馈备份。' : includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
+                        return;
                     }
+                    const result = await call('manage', {
+                        action, backup, dryRun, ...(!dryRun && [2, 3, 4].includes(backup.version) ? { planToken: plan.planToken } : {}),
+                    });
+                    if (dryRun) { setPlan(result); return; }
+                    setPlan(null);
+                    setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次、${result.importedFeedback ?? 0} 条呈现与反馈、${result.importedNarratives ?? 0} 个叙述版本。`);
+                    onChanged?.();
                 } catch (error) {
                     setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
                 } finally { setBusy(false); }
@@ -1323,11 +1325,13 @@ window.__ModuleLoader__.load({
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true) }, '下载记忆与审计备份'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true) }, '下载含用户反馈的备份'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true, true) }, '下载含叙述历史的备份'),
                 h('p', null, 'v3 备份包含结果与撤回历史；会话绑定、调度和学习任务仍不包含在内。'),
+                h('p', null, 'v4 额外包含已保存的叙述版本；未确认草稿与模型配置不在备份中。'),
                 h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
                 plan ? h('div', { role: 'status' },
-                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次、${plan.plannedFeedback ?? 0} 条呈现与反馈，跳过 ${plan.skipped} 条记忆。`),
+                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次、${plan.plannedFeedback ?? 0} 条呈现与反馈、${plan.plannedNarratives ?? 0} 个叙述版本，跳过 ${plan.skipped} 条记忆和 ${plan.skippedNarratives ?? 0} 个叙述版本。`),
                     h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
                 message ? h('p', { role: 'status' }, message) : null);
         }

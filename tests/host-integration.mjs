@@ -38,6 +38,7 @@ function startInstance(config = {}, failure = {}, storageRoot = root, llm) {
                         throw new Error('真实存储验收模拟睡眠中断')
                     }
                     if (spec.name === 'memory_sleep_audit' && failure.audit) throw new Error('真实审计备份导入中断')
+                    if (spec.name === 'memory_narratives' && failure.narrative) throw new Error('真实叙述备份导入中断')
                     await put(id, record)
                 }
                 // 宿主实例测试绝不进入物理遗忘，避免测试清理误触文件删除。
@@ -531,7 +532,26 @@ try {
     await narrativeReloaded.api.manage({ action: 'narrativeRetract', id: 'smm_host_narrative', projectId: '甲', versionId: narrativeId })
 } finally { await narrativeReloaded.close() }
 const narrativeRetracted = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, narrativeRoot)
+let narrativeBackup
 try {
     assert.equal((await narrativeRetracted.api.manage({ action: 'narrativeHistory', id: 'smm_host_narrative', projectId: '甲' })).items[0].state, 'retracted')
+    narrativeBackup = (await narrativeRetracted.api.manage({ action: 'export', includeAudit: true, includeFeedback: true, includeNarratives: true })).backup
     console.log('叙述真实存储验收通过：确认落盘、关闭开关后重载读取及撤回再次重载一致。')
 } finally { await narrativeRetracted.close() }
+const narrativeRestoreRoot = await mkdtemp(resolve(testRoot, 'host-narrative-restore-'))
+const narrativeImporting = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, { narrative: true }, narrativeRestoreRoot)
+try {
+    const plan = await narrativeImporting.api.manage({ action: 'import', backup: narrativeBackup })
+    await assert.rejects(narrativeImporting.api.manage({ action: 'import', backup: narrativeBackup, dryRun: false, planToken: plan.planToken }), /叙述备份导入中断/)
+    await assert.rejects(narrativeImporting.api.manage({ action: 'narrativeHistory', id: 'smm_host_narrative', projectId: '甲' }), /叙述备份导入中断/)
+} finally { await narrativeImporting.close() }
+const narrativeRestored = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, narrativeRestoreRoot)
+try {
+    const restored = await narrativeRestored.api.manage({ action: 'export', includeAudit: true, includeFeedback: true, includeNarratives: true })
+    assert.equal(restored.backup.checksum, narrativeBackup.checksum)
+    const versions = await narrativeRestored.api.manage({ action: 'narrativeHistory', id: 'smm_host_narrative', projectId: '甲' })
+    assert.equal(versions.items[0].state, 'retracted')
+    assert.equal(versions.items[0].id, narrativeId)
+    assert.equal((await narrativeRestored.api.manage({ action: 'import', backup: narrativeBackup })).plannedNarratives, 0)
+    console.log('v4 真实存储验收通过：跨目录导入中断、关闭叙述时重载续写及撤回历史恢复一致。')
+} finally { await narrativeRestored.close() }

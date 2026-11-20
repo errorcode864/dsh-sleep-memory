@@ -25,6 +25,7 @@ source_of_truth: decision
 - [实际结果驱动的激励与警示](memory-outcome-feedback.md)
 - [回忆细节收缩与原文对照](memory-recollection.md)
 - [可选反思叙述与独立版本](memory-narrative.md)
+- [叙述历史备份与跨域恢复](memory-narrative-backup.md)
 - 已停止：[Embedding 混合检索草案](memory-hybrid-learning.md)
 - [文档索引](../README.md)
 
@@ -51,4 +52,5 @@ source_of_truth: decision
 | decision | [实际结果驱动的激励与警示](memory-outcome-feedback.md) | active | 2026-11-20 |
 | decision | [回忆细节收缩与原文对照](memory-recollection.md) | active | 2026-11-20 |
 | decision | [可选反思叙述与独立版本](memory-narrative.md) | active | 2026-11-20 |
+| decision | [叙述历史备份与跨域恢复](memory-narrative-backup.md) | active | 2026-11-20 |
 <!-- DOCS-INDEX:END -->

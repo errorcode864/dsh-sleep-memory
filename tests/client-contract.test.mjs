@@ -683,6 +683,35 @@ test('叙述面板经真实 Remote 生成草稿并由用户确认保存及撤回
         assert.ok(flatten(tree).some((node) => node.children.some((value) => typeof value === 'string' && value.includes('已撤回'))))
         assert.equal(host.table.get('smm_narrative_ui').content, '演练未成功，不得直接上线。')
         assert.ok(client.calls.some((entry) => entry.args[0]?.action === 'narrativeDraft' && entry.args[0].expectedVersion))
+        const backupPanel = flatten(page).find((node) => node.type?.name === 'BackupPanel')
+        const backupTree = await client.render(backupPanel.type, backupPanel.props)
+        flatten(backupTree).find((node) => node.children.includes('下载含叙述历史的备份')).props.onClick()
+        await flushTasks()
+        assert.ok(client.calls.some((entry) => entry.args[0]?.includeNarratives === true))
+        assert.equal(client.downloads.length, 1)
+        const { backup } = await host.api.manage({ action: 'export', includeAudit: true, includeFeedback: true, includeNarratives: true })
+        const target = createHarness()
+        const targetClient = await createClient(target)
+        try {
+            const targetPage = await targetClient.render(targetClient.components.get('main'))
+            const targetPanel = flatten(targetPage).find((node) => node.type?.name === 'BackupPanel')
+            let restored = await targetClient.render(targetPanel.type, targetPanel.props)
+            flatten(restored).find((node) => node.props.type === 'file').props.onChange({
+                target: { files: [{ name: 'narratives.json', size: 1000, text: async () => JSON.stringify(backup) }] },
+            })
+            await flushTasks()
+            restored = await targetClient.render(targetPanel.type, targetPanel.props)
+            flatten(restored).find((node) => node.children.includes('预演导入')).props.onClick()
+            await flushTasks()
+            restored = await targetClient.render(targetPanel.type, targetPanel.props)
+            assert.ok(flatten(restored).some((node) => node.children.some((text) => typeof text === 'string' && text.includes('1 个叙述版本'))))
+            assert.equal(target.data.size, 0)
+            flatten(restored).find((node) => node.children.includes('确认导入')).props.onClick()
+            await flushTasks()
+            assert.equal(target.domains.get('memory_narratives').size, 1)
+            assert.equal((await target.api.manage({ action: 'narrativeHistory', id: 'smm_narrative_ui' })).items[0].state, 'retracted')
+            assert.ok(targetClient.calls.some((entry) => entry.args[0]?.backup?.version === 4 && entry.args[0].planToken))
+        } finally { targetClient.dispose(); await target.dispose() }
     } finally { client.dispose(); await host.dispose() }
 })
 

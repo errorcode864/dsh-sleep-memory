@@ -1892,6 +1892,7 @@ export function apply(ctx, config) {
     openRecords: () => domainPromise.then((domain) => domain.table('records')),
     openAudit: () => auditDomainPromise.then((domain) => domain.table('records')),
     openFeedback: () => feedbackDomainPromise.then((domain) => domain.table('records')),
+    openNarratives: () => narrativeDomainPromise.then((domain) => domain.table('records')),
     openState: () => backupDomainPromise.then((domain) => domain.table('records')),
     parseRecord: parseStoredRecord, parseAudit: auditSpec.tables.records.valueSchema.parse, maxRecords: cfg.maxRecords,
   })
@@ -2005,18 +2006,20 @@ export function apply(ctx, config) {
       if (args.action !== 'sleepHistory' && args.action !== 'sleepStats' && await backup.recover()) await feedback?.reload()
       return audit.manage(args)
     }
-    if (args.action === 'export' && (args.includeAudit === true || args.includeFeedback !== undefined)) {
-      if (Object.keys(args).some((key) => !['action', 'includeAudit', 'includeFeedback'].includes(key))
+    if (args.action === 'export' && (args.includeAudit === true || args.includeFeedback !== undefined || args.includeNarratives !== undefined)) {
+      if (Object.keys(args).some((key) => !['action', 'includeAudit', 'includeFeedback', 'includeNarratives'].includes(key))
         || (args.includeFeedback !== undefined && typeof args.includeFeedback !== 'boolean')
+        || (args.includeNarratives !== undefined && typeof args.includeNarratives !== 'boolean')
+        || (args.includeNarratives === true && args.includeFeedback !== true)
         || args.includeAudit !== true) {
-        return { code: 'invalid_args', message: '反馈备份须同时开启 includeAudit，且导出选项须为布尔值' }
+        return { code: 'invalid_args', message: '导出选项须为布尔值；反馈要求 includeAudit，叙述还要求 includeFeedback' }
       }
       await records()
-      return { action: 'export', backup: await backup.export(args.includeFeedback === true) }
+      return { action: 'export', backup: await backup.export(args.includeFeedback === true, args.includeNarratives === true) }
     }
-    if (args.action === 'import' && [2, 3].includes(args.backup?.version)) {
+    if (args.action === 'import' && [2, 3, 4].includes(args.backup?.version)) {
       // 恢复用户确认只能由用户操作授权以免模型通过备份伪造结果。
-      if (args.backup.version === 3 && !trustedFeedback) return { code: 'forbidden', message: '含用户反馈的备份仅允许在管理面板中预演并确认导入' }
+      if (args.backup.version >= 3 && !trustedFeedback) return { code: 'forbidden', message: '含用户反馈或叙述的备份仅允许在管理面板中预演并确认导入' }
       await records()
       const result = await backup.import(args)
       if (result.importedFeedback) await feedback?.reload()
@@ -2954,6 +2957,7 @@ export function apply(ctx, config) {
         batchId: { type: 'string', description: '睡眠审计批次 ID' },
         includeAudit: { type: 'boolean', description: 'export 可选：true 导出含睡眠审计的 v2 备份' },
         includeFeedback: { type: 'boolean', description: 'export 可选：同时开启 includeAudit 时导出含用户反馈及结果的 v3 备份' },
+        includeNarratives: { type: 'boolean', description: 'export 可选：同时开启 includeAudit 与 includeFeedback 时导出含叙述历史的 v4 备份' },
       },
       required: ['action'],
     },

@@ -73,7 +73,7 @@ source_of_truth: code-and-script
 在原文弹窗中读取前后版本和各版证据，通过睡眠审计预演回滚，具体限制见[深层再巩固](../decisions/memory-reconsolidation.md)。
 开启 `progressiveRecallEnabled` 后，概要召回提供 `expandRecall` 入口供模型逐层取证，预算和窗口规则见[递进取证](../decisions/memory-progressive-recall.md)。
 原文弹窗与 `memory_manage recollect` 可生成只读回忆视图，按年龄收缩经历细节并标明省略范围；使用原文版本校验保持对照一致，见[回忆视图](../decisions/memory-recollection.md)。
-可选 `narrativeEnabled` 在管理面板生成独立反思，经模型复核和用户确认后保存；叙述历史暂不纳入 v1～v3 备份，见[叙述实验](../decisions/memory-narrative.md)。
+可选 `narrativeEnabled` 在管理面板生成独立反思，经模型复核和用户确认后保存；叙述历史通过 v4 备份恢复，见[叙述实验](../decisions/memory-narrative.md)。
 
 本地检索不调用嵌入模型且不增加模型依赖，已有聊天模型学习、审核与可选改写继续保留。
 分词缓存默认启用，内容未变时召回强化不会重新分词，词频仍在当前过滤范围内计算。
@@ -127,6 +127,7 @@ recallAliases:
 
 默认 v1 备份不包含学习任务、反馈和审计；可选 [v2 备份](../decisions/memory-audit-backup.md)额外恢复睡眠审计。
 选择“下载含用户反馈的备份”生成 v3，包含实际呈现、普通反馈、结果和撤回历史。
+选择“下载含叙述历史的备份”生成 v4，额外包含解释版本及其撤回状态，导入校验与恢复约束见[叙述备份](../decisions/memory-narrative-backup.md)。
 运行详情展示分词复用、候选差异和反馈计数，反馈总数为已加载持久资料，其他运行计数仍按本次加载统计。
 
 ```bash
