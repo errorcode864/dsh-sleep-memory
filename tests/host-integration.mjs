@@ -3,6 +3,8 @@ import { createRequire } from 'node:module'
 import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { apply } from '../index.js'
+import { exportMemoryBackup } from '../memory-contract.js'
+import { fixture } from './harness.mjs'
 
 // 在 Electron 的 Node 模式下读取已安装宿主组件；只写入本仓库 tmp 隔离目录。
 const appPackage = process.env.DSH_APP_PACKAGE
@@ -241,3 +243,62 @@ try {
     assert.equal((await imported.api.manage({ action: 'sleepStats' })).batchCount, auditBackup.audits.length)
     console.log('审计备份真实存储验收通过：新目录导入中断后重载续写，记忆和审计逐项一致。')
 } finally { await imported.close() }
+
+const dormantRoot = await mkdtemp(resolve(testRoot, 'host-dormancy-'))
+const dormantConfig = {
+    autoLearnEnabled: false, recallReviewEnabled: false, dormancyEnabled: true,
+    sleepIntervalMinutes: 0, dormantAfterDays: 10, dormantStrengthLine: 0.2,
+}
+const dormantHost = startInstance(dormantConfig, {}, dormantRoot)
+let dormancyBatchId
+try {
+    const record = fixture('smm_host_dormant', {
+        layer: 'deep', content: '兼容清单需要先核对', strength: 0.1, lastAccessAt: Date.now() - 20 * 86_400_000,
+        recallTriggers: [{ when: '准备迁移时', cues: ['数据搬家'] }],
+    })
+    await dormantHost.api.manage({
+        action: 'import', dryRun: false, backup: exportMemoryBackup(new Map([[record.id, record]])),
+    })
+    dormancyBatchId = (await dormantHost.call('memory_sleep', {})).auditId
+    assert.equal((await dormantHost.api.getRecord({ id: record.id })).record.access.state, 'dormant')
+} finally { await dormantHost.close() }
+const wakeHost = startInstance(dormantConfig, {}, dormantRoot)
+let wakeBatchId
+try {
+    const recalled = await wakeHost.call('memory_recall', { query: '数据搬家' })
+    assert.equal(recalled.hits[0].wake.via, 'context')
+    wakeBatchId = (await wakeHost.api.manage({ action: 'sleepHistory' })).items.find((batch) => batch.report.operation === 'wake').id
+    assert.ok(wakeBatchId !== dormancyBatchId)
+} finally { await wakeHost.close() }
+const wakeReloaded = startInstance(dormantConfig, {}, dormantRoot)
+try {
+    assert.equal((await wakeReloaded.api.getRecord({ id: 'smm_host_dormant' })).record.access.state, 'awake')
+    const plan = await wakeReloaded.api.manage({ action: 'sleepRollback', batchId: wakeBatchId })
+    await wakeReloaded.api.manage({ action: 'sleepRollback', batchId: wakeBatchId, dryRun: false, planToken: plan.planToken })
+    assert.equal((await wakeReloaded.api.getRecord({ id: 'smm_host_dormant' })).record.access.state, 'dormant')
+    console.log('休眠真实存储验收通过：睡眠落盘、重载唤醒、再次重载与回滚休眠。')
+} finally { await wakeReloaded.close() }
+
+const preferenceRoot = await mkdtemp(resolve(testRoot, 'host-preferences-'))
+const preferenceConfig = { preferenceRecallEnabled: true, autoLearnEnabled: false, recallReviewEnabled: false, sleepIntervalMinutes: 0 }
+const preferenceHost = startInstance(preferenceConfig, {}, preferenceRoot)
+try {
+    await preferenceHost.api.manage({ action: 'import', dryRun: false, backup: exportMemoryBackup(new Map([
+        ['smm_language', fixture('smm_language', { content: '以后回复使用中文。', source: { kind: 'user', confirmed: true } })],
+    ])) })
+} finally { await preferenceHost.close() }
+const preferenceReloaded = startInstance(preferenceConfig, {}, preferenceRoot)
+try {
+    for (const [index, [text, expected]] of [['解释缓存', 1], ['这次用英文回复', 0], ['解释缓存', 1]].entries()) {
+        const message = { id: `偏好轮次-${index}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }
+        const response = await preferenceReloaded.handlers.get('agent/pre-step')({
+            step: 1, messages: [message], agent: { id: '偏好会话' },
+        }, async () => ({ kind: 'enter', messages: [message] }))
+        assert.equal(response.messages.filter((item) => item.source?.kind === 'sleep-memory').length, expected)
+    }
+    const traces = (await preferenceReloaded.api.status()).metrics.recentRecalls
+    assert.equal(traces[1].diagnostics.reasons['preference-overridden'], 1)
+    assert.equal(traces[2].returnedIds[0], 'smm_language')
+    assert.equal((await preferenceReloaded.api.getRecord({ id: 'smm_language' })).record.content, '以后回复使用中文。')
+    console.log('偏好真实存储验收通过：重载应用、临时覆盖、后续恢复及诊断一致。')
+} finally { await preferenceReloaded.close() }

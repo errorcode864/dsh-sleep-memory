@@ -217,6 +217,24 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 两个开关均默认关闭，完整接口与验证边界见[睡眠审计与情境触发](docs/decisions/memory-contextual-audit.md)。
 真实模型评测入口为 `npm run eval:model -- --check`，配置及试用步骤见[模型试用指南](docs/guides/model-trial.md)。
 
+### 慢衰减与按需唤醒（可选）
+
+`deepDecayHalfLifeDays` 和 `archiveDecayHalfLifeDays` 可分别延长深层与归档半衰期，默认 `0` 沿用普通值。
+开启 `dormancyEnabled` 和睡眠审计后，长期未使用且强度低的记忆进入休眠，保留原文及巩固关系。
+情境条件或联想路径命中后，通过呈现筛选的候选才会写入唤醒审计；审核拒绝或预算不足不会唤醒。
+面板可查看休眠状态、唤醒路径并预演回滚，具体边界见[分层衰减、休眠与偏好召回](docs/decisions/memory-dormancy.md)。
+
+情境召回同时补充有用户证据的回复语言偏好，支持“简体中文回复”与“使用哪种语言”等问法差异。
+此规则不覆盖任意同义句，候选仍需经过既有范围与审核流程。
+
+### 召回诊断与长期表达偏好
+
+运行面板显示最近 20 次召回的候选、审核、返回数量及过滤原因，区分漏召回、拒绝、超时和预算不足。
+`recallDiagnosticsEnabled` 默认开启，仅保留计数与记忆 ID，不记录问题或记忆正文。
+`preferenceRecallEnabled` 默认关闭，开启后可在普通任务中应用有用户证据的语言、详略和格式偏好。
+当前明确要求覆盖本轮偏好，后续恢复长期偏好；项目偏好优先且冲突不自动裁决。
+范围、审核与预算继续生效，详细规则和评测边界见[召回诊断与长期表达偏好](docs/decisions/memory-recall-preferences.md)。
+
 ---
 
 ## 项目结构
@@ -233,6 +251,8 @@ sleep-memory/
 ├── memory-query-plan.js    # 本地强词筛选与项目术语通道
 ├── memory-learning-jobs.js # 已验证候选持久化与恢复
 ├── memory-feedback.js     # 实际呈现与明确用户反馈
+├── memory-access.js       # 可回滚休眠与唤醒状态
+├── memory-preferences.js  # 回复语言偏好的候选补充
 ├── memory-management.js    # memory_manage 工具实现
 ├── eval.mjs / smoke.mjs    # 检索基线 / 冒烟测试
 ├── locale/                 # 插件管理页双语标题与描述
@@ -257,6 +277,11 @@ sleep-memory/
 | `sleepIntervalMinutes` | 360 | 定时睡眠间隔，0 关闭 |
 | `sleepOnStart` | false | 加载时按期补跑 |
 | `decayHalfLifeDays` | 14 | 衰减基准半衰期（天），随重要度放大 |
+| `deepDecayHalfLifeDays` | 0 | 深层专用半衰期，0 沿用普通值 |
+| `archiveDecayHalfLifeDays` | 0 | 归档专用半衰期，0 沿用普通值 |
+| `dormancyEnabled` | false | 开启休眠，要求同时开启 `sleepAuditEnabled` |
+| `dormantAfterDays` | 90 | 进入休眠所需的闲置天数 |
+| `dormantStrengthLine` | 0.15 | 进入休眠所需的强度上限 |
 | `deleteArchiveAfterDays` | 90 | 归档记录触发彻底删除的闲置天数 |
 | `injectEnabled` | true | 自动注入总开关 |
 | `injectBudget` | 3 | 单次注入条数上限，0 关闭注入 |
@@ -267,6 +292,8 @@ sleep-memory/
 | `autoLearnMaxItems` | 3 | 每轮最多学习的候选条数 |
 | `autoLearnTimeoutMs` | 30000 | 后台学习等待上限，单位毫秒 |
 | `recallReviewEnabled` | true | 自动注入前审核任务相关性 |
+| `recallDiagnosticsEnabled` | true | 最近 20 次召回的阶段诊断，不改变候选和排序 |
+| `preferenceRecallEnabled` | false | 普通任务应用语言、详略和格式偏好 |
 | `recallReviewTimeoutMs` | 3000 | 召回审核等待上限，单位毫秒 |
 | `recallCandidateBudget` | 12 | 审核前的直接候选数量，与最终注入预算分开 |
 | `injectMinScore` | 0.2 | 词与实体加权后的 BM25 候选门槛，不代表相关概率 |
@@ -291,7 +318,7 @@ sleep-memory/
 - 管理面板可查看整个个人 profile，不是多用户权限边界；`source.confirmed` 是调用者提供的溯源声明，不是权限凭据。
 - 不提供 dense 检索、多主机实时同步、自动事实冲突裁决或多用户鉴权。
 - 自主学习和审核依赖模型判断，逐字证据检查不等于语义蕴含证明；尚未给出真实 LLM 的准确率保证。
-  候选召回仍依赖词面或可选查询扩展，审核无法找回未进入候选集的记忆。
+  候选召回主要依赖词面、情境规则或可选查询扩展，审核无法找回未进入候选集的记忆。
   没有项目范围时只允许自主学习用户偏好，避免项目知识污染全局；项目知识需先建立工作区或会话绑定。
 - 存储没有跨记录事务；睡眠或导入发生 I/O 错误时可能部分完成，需核对错误与库存。
 - JSON 备份仅包含记忆与有效性，不含本机会话绑定、调度、学习任务、反馈及配置；跨机器需要重新绑定项目。

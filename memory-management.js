@@ -129,7 +129,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     if (record.layer === 'deep') return invalid('请先展开概要，纠正具体来源事实')
     if (table.size >= cfg.maxRecords) return { code: 'capacity_full', message: '容量不足，无法保留新旧两条事实' }
     const now = Date.now()
-    const { lifecycle, ...previous } = record
+    const { lifecycle, access, ...previous } = record
     const corrected = {
         ...previous, id: createMemoryId(), content: args.content.trim(), layer: 'surface',
         strength: 0.6, valence: null, arousal: null, accessCount: 0,

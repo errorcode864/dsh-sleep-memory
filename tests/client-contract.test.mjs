@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
 import { webcrypto } from 'node:crypto'
-import { createHarness, fixture, flushTasks } from './harness.mjs'
+import { createHarness, createMessage, fixture, flushTasks, injectMessage } from './harness.mjs'
 
 /** 执行真实 client 模块和 Remote 描述符；替身只提供宿主、React 生命周期。 */
 async function createClient(host) {
@@ -123,7 +123,7 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 10)
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 13)
         for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
@@ -154,6 +154,13 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         assert.equal(override.contextualRecallEnabled, true)
         await host.api.setConfig({ changes: { sleepAuditMaxBytes: 104857600 } })
         assert.equal(override.sleepAuditMaxBytes, 104857600)
+        await host.api.setConfig({ changes: { dormancyEnabled: true, dormantStrengthLine: 0.15, deepDecayHalfLifeDays: 90 } })
+        assert.equal(override.dormancyEnabled, true)
+        assert.equal(override.dormantStrengthLine, 0.15)
+        await host.api.setConfig({ changes: { recallDiagnosticsEnabled: false, preferenceRecallEnabled: true } })
+        assert.equal(override.recallDiagnosticsEnabled, false)
+        assert.equal(override.preferenceRecallEnabled, true)
+        await assert.rejects(host.api.setConfig({ changes: { sleepAuditEnabled: false } }), /sleepAuditEnabled/)
         await assert.rejects(host.api.setConfig({ changes: { sleepAuditMaxBytes: -1 } }), /sleepAuditMaxBytes/)
     } finally { client.dispose() }
 })
@@ -357,6 +364,7 @@ test('界面会话绑定按选择的 ID 生效，释放后显示全局回退', a
 test('列表原文按钮调用新 Remote 方法，运行状态面板可读', async () => {
     const host = createHarness()
     await host.table.put('smm_a', fixture('smm_a', { projectId: '甲' }))
+    await injectMessage(host, createMessage('独立诊断查询正文'))
     const client = await createClient(host)
     try {
         const main = client.components.get('main')
@@ -373,6 +381,9 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
         const runtime = flatten(tree).find((node) => node.type?.name === 'RuntimeStatus')
         const statusTree = await client.render(runtime.type, runtime.props)
         assert.equal(statusTree.props['aria-label'], '记忆运行状态')
+        assert.ok(flatten(statusTree).some((node) => node.children.includes('最近召回结果')))
+        assert.ok(flatten(statusTree).some((node) => node.children.some((text) => typeof text === 'string' && text.includes('项目范围不符'))))
+        assert.ok(!JSON.stringify(statusTree).includes('独立诊断查询正文'))
         assert.ok(client.calls.some((call) => call.method === 'status'))
         for (const label of ['学习 Token', '审核 Token', '扩展 Token', '评分 Token', '注入 Token 估算', '按需证据读取']) {
             assert.ok(flatten(statusTree).some((node) => node.type === 'th' && node.children.includes(label)))
@@ -480,6 +491,33 @@ test('配置入口覆盖规范包名、旧安装别名，以及 bundle 和组件
         }
         assert.equal(client.slotRegistrations.filter((options) => options.name === 'main').length, 1)
     } finally { client.dispose() }
+})
+
+test('记忆详情展示独立休眠状态和最近关联唤醒路径', async () => {
+    const host = createHarness()
+    await host.table.put('smm_dormant_ui', fixture('smm_dormant_ui', {
+        layer: 'deep', access: {
+            state: 'dormant', at: Date.now(), reason: '长期低强度',
+            lastWake: { at: Date.now() - 1000, via: 'association', fromId: 'smm_seed', hops: 2 },
+        },
+    }))
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const node = flatten(page).find((item) => item.type?.name === 'RecordRow')
+        let row = await client.render(node.type, node.props)
+        assert.ok(flatten(row).some((item) => item.children.includes('休眠')))
+        flatten(row).find((item) => item.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        row = await client.render(node.type, node.props)
+        assert.ok(flatten(row).some((item) => item.children.includes('可访问状态')))
+        assert.ok(flatten(row).some((item) => item.children.some((value) => typeof value === 'string' && value.includes('关联 smm_seed · 2 跳'))))
+    } finally {
+        client.dispose()
+        await host.dispose()
+    }
 })
 
 test('原文入口为行内按钮，详情在独立弹窗展示且关闭后保留列表摘要', async () => {

@@ -11,7 +11,7 @@ export const MODEL_CASES = [
 ]
 
 /** 合成资料通过真实学习与审核入口，逐例报告且不把存储成功等同语义正确。 */
-export async function evaluateModelPipeline(llm, { cases = MODEL_CASES, route = { provider: 'live-evaluation', model: 'configured' } } = {}) {
+export async function evaluateModelPipeline(llm, { cases = MODEL_CASES, route = { provider: 'live-evaluation', model: 'configured' }, config = {} } = {}) {
     const results = []
     for (const scenario of cases) {
         const pending = new Set()
@@ -34,7 +34,7 @@ export async function evaluateModelPipeline(llm, { cases = MODEL_CASES, route = 
             autoLearnEnabled: true, recallReviewEnabled: true, learningPolicyMode: 'evidence',
             projectId: 'synthetic-starfan', contextualRecallEnabled: true, sleepAuditEnabled: true,
             recallPlanMode: 'local', recallReviewTimeoutMs: 30_000, autoLearnTimeoutMs: 60_000,
-            injectRepeatAfterTurns: 0,
+            injectRepeatAfterTurns: 0, ...config,
         }, { llm: tracked })
         const startedAt = Date.now()
         try {

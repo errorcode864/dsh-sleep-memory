@@ -10,9 +10,9 @@ source_of_truth: code-and-script
 
 # 真实模型评测与单项目试用
 
-截至 2026-11-20，本轮已准备真实模型评测入口与合成样本。
-环境缺少模型地址、模型名及 API Key，尚未发送真实模型请求。
-自动化替身只验证评测流程，不能据此声明真实模型的准确率。
+截至 2026-11-20，已通过本地忽略的环境配置调用 `deepseek-v4.1-flash` 完成合成样本评测。
+首次评测发现短语言偏好已写入但不同问法未进入候选，修复后两条定向复测均召回且通过审核。
+样本数量有限，结果不代表真实项目的总体准确率。
 
 ## 真实模型预检
 
@@ -49,6 +49,7 @@ npm run eval:model -- --max-calls 18 --report tmp/live-model-evaluation.json
 `storageMatchesLabel` 只比较应记标签与是否写入，不能证明语义正确。
 人工仍须核对正文、证据、情境条件和适用范围，报告逐例标记 `needsHumanReview`。
 零候选不会调用审核模型，相关任务没有注入时应进一步区分检索缺口与审核拒绝。
+运行面板的“最近召回结果”可区分候选未命中、审核失败、超时、预算不足和内容版本变化。
 配置缺失时正常执行命令退出码为 2，模型调用失败或学习等待超时退出码为 1。
 报告保留模型名和查询文本，截断响应若返回用量也会计入失败请求成本。
 
@@ -79,6 +80,11 @@ semanticRecallEnabled: false
 影子规划比较只反映本地规划的候选差异，情境触发本轮没有独立的影子开关。
 每次调整一个因素，再决定是否从 `shadow` 切到 `local`。
 任何配置切换都保留已写入的记忆与审计，关闭开关不等于撤销数据变化。
+
+休眠试用另行设置 `dormancyEnabled: true`，先用 `memory_sleep dryRun:true` 查看影响。
+分层半衰期、休眠阈值与唤醒回滚见[分层衰减、休眠与偏好召回](../decisions/memory-dormancy.md)。
+长期表达偏好需另开 `preferenceRecallEnabled: true`，先运行 `npm run eval:preferences -- --enabled --split all`。
+60 条固定事实样本与真实学习评测分别验收，命令和首次失败记录见[偏好验收说明](../decisions/memory-recall-preferences.md)。
 
 本轮未完成个人 profile 安装、配置 reconcile 或真实项目轮次采样。
 这些事项与合成模型评测分别验收，不能互相替代。

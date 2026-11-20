@@ -166,7 +166,9 @@ export function createSleepAudit(openRecords, openAudit, maxBytes) {
             const conflicts = [
                 ...batch.changes.filter((change) => !sameRecord(records.get(change.id), change.after)).map((change) => change.id),
                 ...[...records.entries()].filter(([id, record]) => !changedIds.has(id)
-                    && (changedIds.has(record.replaces) || changedIds.has(record.supersededBy)))
+                    && (changedIds.has(record.replaces) || (changedIds.has(record.supersededBy)
+                        && !batch.changes.find((change) => change.id === record.supersededBy)?.before?.edges
+                            .some((edge) => edge.relation === 'consolidates' && edge.target === id))))
                     .map(([id]) => id),
             ]
             if (conflicts.length) return { code: 'audit_conflict', message: '睡眠之后的记忆已改变，不能覆盖', conflicts }

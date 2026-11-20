@@ -28,6 +28,9 @@ source_of_truth: code-and-decision
   - [第 5–7 阶段实施清单](decisions/memory-phase-5-7-plan.md)（decision，active，更新于 2026-11-17）
   - [睡眠审计与情境触发](decisions/memory-contextual-audit.md)（decision，active，更新于 2026-11-17）
   - [审计容量与备份恢复](decisions/memory-audit-backup.md)（decision，active，更新于 2026-11-20）
+  - [分层衰减、休眠与偏好召回](decisions/memory-dormancy.md)（decision，active，更新于 2026-11-20）
+  - [休眠之后的开发路线](decisions/memory-next-plan.md)（decision，draft，更新于 2026-11-20）
+  - [召回诊断与长期表达偏好](decisions/memory-recall-preferences.md)（decision，active，更新于 2026-11-20）
 
 ### 指南与运维
 

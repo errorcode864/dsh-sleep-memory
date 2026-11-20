@@ -19,6 +19,33 @@ export function createMemoryMetrics() {
     }
     return {
         state,
+        /** 每次召回独立记录阶段结果且不保留正文。 */
+        startRecall(mode, detailed) {
+            const startedAt = performance.now()
+            const data = { mode, candidateCount: 0, approvedCount: 0, returnedIds: [], estimatedTokens: 0 }
+            const diagnostics = { stage: 'candidate', review: 'not-run', selectedCount: 0, wakeCount: 0, reasons: {} }
+            return {
+                data, diagnostics,
+                skip(reason, count = 1) {
+                    if (count > 0) diagnostics.reasons[reason] = (diagnostics.reasons[reason] ?? 0) + count
+                },
+                fail(error) {
+                    const reason = error.code === 'audit_capacity' ? 'audit-capacity'
+                        : diagnostics.stage === 'write' ? 'write-failed' : 'pipeline-failed'
+                    diagnostics.reasons[reason] = 1
+                    diagnostics.failed = true
+                },
+                finish() {
+                    state.recentRecalls.push({
+                        at: Date.now(), ...data, durationMs: Math.round(performance.now() - startedAt),
+                        ...(detailed ? { diagnostics: {
+                            ...diagnostics, outcome: diagnostics.failed ? 'failed' : data.returnedIds.length ? 'returned' : 'empty',
+                        } } : {}),
+                    })
+                    if (state.recentRecalls.length > 20) state.recentRecalls.shift()
+                },
+            }
+        },
         startModel(stage, messages) {
             const startedAt = performance.now()
             const counters = state.models[stage]

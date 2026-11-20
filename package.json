@@ -6,7 +6,8 @@
     "eval": "node eval.mjs",
     "test:host": "node tests/host-integration.mjs",
     "bench:search": "node tests/search-benchmark.mjs",
-    "eval:model": "node tests/live-model-eval.mjs"
+    "eval:model": "node tests/live-model-eval.mjs",
+    "eval:preferences": "node tests/preference-eval.mjs"
   },
   "repository": {
     "type": "git",
@@ -34,6 +35,8 @@
     "memory-feedback.js",
     "memory-sleep-audit.js",
     "memory-backup.js",
+    "memory-access.js",
+    "memory-preferences.js",
     "memory-triggers.js",
     "memory-retrieval.js",
     "memory-search-index.js",

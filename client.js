@@ -786,6 +786,7 @@ window.__ModuleLoader__.load({
               }, '查看原文与来源')),
             h('div', { className: 'sm-rowhead' },
               h(LayerBadge, { layer: item.layer }),
+              item.access?.state === 'dormant' ? h('span', { className: 'sm-badge' }, '休眠') : null,
               h('span', { className: 'sm-badge' }, kindLabel),
               salient ? h('span', {
                 className: `sm-badge ${Number(item.valence) >= 0 ? 'is-salient-pos' : 'is-salient-neg'}`,
@@ -818,7 +819,12 @@ window.__ModuleLoader__.load({
                     h('div', null, h('dt', null, '记忆 ID'), h('dd', null, detail.record.id)),
                     h('div', null, h('dt', null, '范围'), h('dd', null, detail.record.projectId ?? '全局')),
                     h('div', null, h('dt', null, '有效性'), h('dd', null, `${STATE_LABELS[detail.lifecycle.state]}${detail.lifecycle.reason ? ` · ${detail.lifecycle.reason}` : ''}`)),
-                    h('div', null, h('dt', null, '自动召回'), h('dd', null, detail.current ? '参与' : '未参与'))),
+                    h('div', null, h('dt', null, '自动召回'), h('dd', null, detail.current
+                      ? detail.record.access?.state === 'dormant' ? '休眠标记；开启休眠时需情境或关联路径' : '参与' : '未参与')),
+                    detail.record.access ? h('div', null, h('dt', null, '可访问状态'), h('dd', null,
+                      `${detail.record.access.state === 'dormant' ? '休眠' : '已唤醒'} · ${detail.record.access.reason} · ${formatRuntimeTime(detail.record.access.at)}`)) : null,
+                    detail.record.access?.lastWake ? h('div', null, h('dt', null, '最近唤醒'), h('dd', null,
+                      `${formatRuntimeTime(detail.record.access.lastWake.at)} · ${detail.record.access.lastWake.via === 'context' ? '情境条件' : `关联 ${detail.record.access.lastWake.fromId} · ${detail.record.access.lastWake.hops} 跳`}`)) : null),
                   detail.replacedBy ? h('p', { className: 'sm-runtime-note' }, `替代记忆：${detail.replacedBy}`) : null),
                 h('section', { className: 'sm-record-section', 'aria-label': '来源信息' },
                   h('h3', null, '来源信息'),
@@ -1076,7 +1082,7 @@ window.__ModuleLoader__.load({
                         setPlan(result);
                         return;
                     }
-                    setMessage(input.action === 'sleepRecover' ? `恢复完成：${result.recovered} 个批次。` : '回滚完成，新概要已停用。');
+                    setMessage(input.action === 'sleepRecover' ? `恢复完成：${result.recovered} 个批次。` : '回滚完成，已恢复批次前的记忆状态。');
                     setDetail(null);
                     setHistory(await call('manage', { action: 'sleepHistory', limit: 10 }));
                     onChanged?.();
@@ -1097,7 +1103,7 @@ window.__ModuleLoader__.load({
                 history ? h('div', null,
                     h('p', null, `共 ${history.total} 个批次`),
                     history.items.map((batch) => h('div', { key: batch.id },
-                        h('p', null, `${formatRuntimeTime(batch.createdAt)} · ${{ prepared: '待恢复', applied: '已完成', 'rolling-back': '回滚待恢复', 'rolled-back': '已回滚' }[batch.state]} · 修改 ${batch.changedCount} 条`),
+                        h('p', null, `${formatRuntimeTime(batch.createdAt)} · ${batch.report.operation === 'wake' ? '记忆唤醒 · ' : ''}${{ prepared: '待恢复', applied: '已完成', 'rolling-back': '回滚待恢复', 'rolled-back': '已回滚' }[batch.state]} · 修改 ${batch.changedCount} 条`),
                         h('code', null, batch.id),
                         h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
                             onClick: () => void run({ action: 'sleepHistory', batchId: batch.id, limit: 5 }) }, '查看修改'),
@@ -1224,6 +1230,7 @@ window.__ModuleLoader__.load({
           const phases = [
             t('sleep-memory.sleep.phase.consolidate', { n: report.consolidatedCount ?? 0 }),
             t('sleep-memory.sleep.phase.archive', { n: report.archivedCount ?? 0 }),
+            ...(report.dormantCount !== undefined ? [`进入休眠 ${report.dormantCount}`] : []),
             t('sleep-memory.sleep.phase.forget', { n: report.deletedCount ?? 0 }),
             t('sleep-memory.sleep.phase.rem', { n: report.edgesAdded ?? 0 }),
             t('sleep-memory.sleep.phase.decay', { n: report.decayedCount ?? 0 }),
@@ -1304,6 +1311,23 @@ window.__ModuleLoader__.load({
               state.schedule?.lastError ? h('p', { className: 'sm-runtime-error', role: 'alert' },
                 `调度失败：${state.schedule.lastError} · 连续失败 ${state.schedule.failures} 次`) : null,
               state.lastSleepError ? h('p', { className: 'sm-runtime-error', role: 'alert' }, `最近整理失败：${state.lastSleepError.message}`) : null,
+              h('details', null,
+                h('summary', null, '最近召回结果'),
+                ...(state.metrics?.recentRecalls ?? []).slice().reverse().map((trace, index) => h('div', { key: index },
+                  h('p', null, `${formatRuntimeTime(trace.at)} · ${trace.mode === 'automatic' ? '自动注入' : '显式检索'} · 候选 ${trace.candidateCount} · 通过 ${trace.approvedCount ?? 0} · 返回 ${trace.returnedIds.length} · ${trace.durationMs} 毫秒`),
+                  trace.diagnostics ? h('p', null, Object.entries(trace.diagnostics.reasons).map(([reason, count]) =>
+                    `${{
+                      'empty-store': '记忆库为空', 'no-eligible': '没有符合范围的记忆', 'no-query-terms': '缺少有效查询词',
+                      'no-match': '候选未命中', inactive: '记忆已失效或已巩固', scope: '项目范围不符',
+                      layer: '层级不符', time: '时间不符', dormant: '休眠条件未触发', 'entity-conflict': '精确实体冲突',
+                      duplicate: '重复注入已跳过', reentry: '同一消息重复进入', disabled: '自动注入已关闭',
+                      'review-rejected': '审核拒绝', 'review-timeout': '审核超时', 'review-failed': '审核调用或响应失败',
+                      'review-cancelled': '审核已取消', cancelled: '任务已取消', 'scope-changed': '项目范围已改变',
+                      'version-changed': '记忆版本已改变', 'count-budget': '条数预算不足', 'char-budget': '字符预算不足',
+                      'token-budget': 'Token 预算不足', 'path-rejected': '关联路径未通过', 'audit-capacity': '审计容量不足',
+                      'write-failed': '呈现前写入失败', 'pipeline-failed': '召回处理失败',
+                      'preference-overridden': '当前要求覆盖或偏好待裁决',
+                    }[reason] ?? reason} ${count}`).join('；') || '已通过本次筛选') : null))),
               h('div', { className: 'sm-runtime-counts' },
                 h('h3', null, '本次加载'),
                 h('p', { className: 'sm-runtime-note' }, hasActivity ? '以下计数仅统计本次加载。' : '本次加载暂无运行记录。'),
@@ -1597,9 +1621,11 @@ window.__ModuleLoader__.load({
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
-          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled',
+          'autoLearnEnabled', 'recallReviewEnabled', 'recallDiagnosticsEnabled', 'semanticRecallEnabled',
           'sleepAuditEnabled', 'contextualRecallEnabled',
           'sleepAuditMaxBytes',
+          'dormancyEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
+          'preferenceRecallEnabled',
           'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
@@ -1615,11 +1641,11 @@ window.__ModuleLoader__.load({
           return draft;
         }
 
-        /** Whole-number parse clamped by the field's range; null when invalid. */
+        /** 数字按字段声明解析并保持服务端范围约束。 */
         function configParseNumber(raw, field) {
-          if (!/^-?\d+$/.test(raw)) return null;
+          if (!(field.type === 'number' ? /^-?\d+(?:\.\d+)?$/ : /^-?\d+$/).test(raw)) return null;
           const parsed = Number(raw);
-          if (!Number.isSafeInteger(parsed) || parsed < field.min || parsed > field.max) return null;
+          if (!Number.isFinite(parsed) || (field.type !== 'number' && !Number.isSafeInteger(parsed)) || parsed < field.min || parsed > field.max) return null;
           return parsed;
         }
 
@@ -1721,6 +1747,8 @@ window.__ModuleLoader__.load({
           for (const [key, label, hint] of [
             ['autoLearnEnabled', '自主学习有用信息', '完成对话后后台提取有来源的事实和经验；冲突内容标记待复核'],
             ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
+            ['recallDiagnosticsEnabled', '召回阶段诊断', '保存最近 20 次的阶段计数和原因；不保存问题与记忆正文'],
+            ['preferenceRecallEnabled', '长期表达偏好应用', '普通任务按需使用语言、详略和格式偏好；当前明确要求优先'],
             ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
             ['feedbackEnabled', '记录召回与用户反馈', '按呈现版本保存反馈；曝光次数不代表认可'],
             ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],
@@ -1728,6 +1756,7 @@ window.__ModuleLoader__.load({
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
             ['sleepAuditEnabled', '睡眠审计与回滚', '保留批次修改证据并暂停物理遗忘；可在记忆管理中预演回滚'],
             ['contextualRecallEnabled', '情境触发召回', '使用记忆中的具体情境短语补充候选；仍经过相关性审核与预算检查'],
+            ['dormancyEnabled', '深层记忆休眠', '需同时开启睡眠审计；长期低强度记忆通过情境或关联路径唤醒'],
           ]) {
             if (!fields[key]) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
@@ -1786,13 +1815,17 @@ window.__ModuleLoader__.load({
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
             ['sleepAuditMaxBytes', '审计内容容量上限', '单位为字节，0 表示不限；达到上限后暂停新增睡眠批次且保留已有证据'],
+            ['deepDecayHalfLifeDays', '深层衰减半衰期', '单位为天，0 沿用普通半衰期；较大值使深层记忆衰减更慢'],
+            ['archiveDecayHalfLifeDays', '归档衰减半衰期', '单位为天，0 沿用普通半衰期'],
+            ['dormantAfterDays', '休眠闲置期限', '单位为天，达到期限且强度低于阈值才进入休眠'],
+            ['dormantStrengthLine', '休眠强度阈值', '0 至 1；休眠保留原文、有效性和巩固关系'],
           ]) {
             const field = fields[key];
             if (!field) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
               h('span', { className: 'sm-config-label' }, label),
               h('input', {
-                type: 'number', className: 'sm-search sm-config-num', min: field.min, max: field.max, step: 1,
+                type: 'number', className: 'sm-search sm-config-num', min: field.min, max: field.max, step: field.type === 'number' ? 0.01 : 1,
                 value: String(draft[key] ?? ''), disabled: busy, 'aria-label': label,
                 onChange: (event) => setNumber(key, event.target.value),
               }),

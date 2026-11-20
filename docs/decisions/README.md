@@ -15,6 +15,9 @@ source_of_truth: decision
 - [第 5–7 阶段实施清单](memory-phase-5-7-plan.md)
 - [睡眠审计与情境触发](memory-contextual-audit.md)
 - [审计容量与备份恢复](memory-audit-backup.md)
+- [分层衰减、休眠与偏好召回](memory-dormancy.md)
+- 待实施：[休眠之后的开发路线](memory-next-plan.md)
+- [召回诊断与长期表达偏好](memory-recall-preferences.md)
 - 已停止：[Embedding 混合检索草案](memory-hybrid-learning.md)
 - [文档索引](../README.md)
 
@@ -31,4 +34,7 @@ source_of_truth: decision
 | decision | [第 5–7 阶段实施清单](memory-phase-5-7-plan.md) | active | 2026-11-17 |
 | decision | [睡眠审计与情境触发](memory-contextual-audit.md) | active | 2026-11-17 |
 | decision | [审计容量与备份恢复](memory-audit-backup.md) | active | 2026-11-20 |
+| decision | [分层衰减、休眠与偏好召回](memory-dormancy.md) | active | 2026-11-20 |
+| decision | [休眠之后的开发路线](memory-next-plan.md) | draft | 2026-11-20 |
+| decision | [召回诊断与长期表达偏好](memory-recall-preferences.md) | active | 2026-11-20 |
 <!-- DOCS-INDEX:END -->
