@@ -4,6 +4,17 @@ import { estimateTokens } from './memory-metrics.js'
 const MAX_EXAMINED_EDGES = 1000
 const CONTENT_PREVIEW_CHARS = 300
 
+/** 追溯与递进取证共用同一来源预览契约。 */
+export function sourcePreview(source, path, view) {
+    return {
+        id: source.id, path, depth: path.length - 1, layer: source.layer, kind: source.kind,
+        content: source.content.slice(0, CONTENT_PREVIEW_CHARS), truncated: source.content.length > CONTENT_PREVIEW_CHARS,
+        leaf: !source.edges.some((link) => link.relation === 'consolidates'),
+        current: view.isCurrent(source), state: view.lifecycleOf(source).state,
+        accessState: source.access?.state ?? 'awake', sourceKind: source.source?.kind ?? 'unknown',
+    }
+}
+
 /** 沿巩固关系读取同范围证据并保留首次到达路径。 */
 export function traceMemorySources(root, view, limits) {
     const result = {
@@ -31,13 +42,7 @@ export function traceMemorySources(root, view, limits) {
             if (path.length > limits.maxDepth) { result.stopped.depth += 1; continue }
             if (result.items.length >= limits.maxNodes) { result.stopped.nodes += 1; return false }
             const sourcePath = [...path, source.id]
-            result.items.push({
-                id: source.id, path: sourcePath, depth: path.length, layer: source.layer, kind: source.kind,
-                content: source.content.slice(0, CONTENT_PREVIEW_CHARS), truncated: source.content.length > CONTENT_PREVIEW_CHARS,
-                leaf: !source.edges.some((link) => link.relation === 'consolidates'),
-                current: view.isCurrent(source), state: view.lifecycleOf(source).state,
-                accessState: source.access?.state ?? 'awake', sourceKind: source.source?.kind ?? 'unknown',
-            })
+            result.items.push(sourcePreview(source, sourcePath, view))
             if (!fitsBudget()) { result.items.pop(); result.stopped.tokens += 1; return false }
             seen.add(source.id)
             if (!visit(source, sourcePath)) return false

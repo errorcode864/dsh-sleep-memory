@@ -406,3 +406,45 @@ try {
     assert.equal((await revisionRestored.api.getRecord({ id: 'smm_new_evidence' })).record.supersededBy, null)
     console.log('深层再巩固真实存储验收通过：版本与原文重载、批次回滚及再次重载一致。')
 } finally { await revisionRestored.close() }
+
+const evidenceRoot = await mkdtemp(resolve(testRoot, 'host-recall-evidence-'))
+const evidenceConfig = { autoLearnEnabled: false, recallReviewEnabled: false, sleepIntervalMinutes: 0,
+    progressiveRecallEnabled: true, injectMaxEstimatedTokens: 2000 }
+const evidenceHost = startInstance(evidenceConfig, {}, evidenceRoot)
+const evidenceContext = { agent: { id: '宿主逐层取证会话' } }
+let evidenceId
+try {
+    const sources = [
+        fixture('smm_detail', { content: '验收端口固定为 8611。', supersededBy: 'smm_middle' }),
+        fixture('smm_middle', { content: '验收需核对端口原文。', layer: 'deep', supersededBy: 'smm_summary',
+            edges: [{ target: 'smm_detail', relation: 'consolidates', weight: 1 }] }),
+        fixture('smm_summary', { content: '验收需要查看部署记录。', layer: 'deep',
+            edges: [{ target: 'smm_middle', relation: 'consolidates', weight: 1 }] }),
+    ]
+    await evidenceHost.api.manage({
+        action: 'import', dryRun: false, backup: exportMemoryBackup(new Map(sources.map((record) => [record.id, record]))),
+    })
+    const message = { id: '宿主取证轮次', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '验收' }] }
+    const injected = await evidenceHost.handlers.get('agent/pre-step')({
+        step: 1, messages: [message], ...evidenceContext,
+    }, async () => ({ kind: 'enter', messages: [message] }))
+    evidenceId = injected.messages.find((item) => item.source?.kind === 'sleep-memory').content[0].text.match(/evidence_[a-f0-9-]{36}/)[0]
+    const before = (await evidenceHost.api.manage({ action: 'export' })).backup.records
+    const first = await evidenceHost.call('memory_manage', { action: 'expandRecall', id: 'smm_summary', recallId: evidenceId }, evidenceContext)
+    assert.equal(first.items[0].id, 'smm_middle')
+    const second = await evidenceHost.call('memory_manage', { action: 'expandRecall', id: 'smm_middle', recallId: evidenceId }, evidenceContext)
+    assert.equal(second.items[0].content, '验收端口固定为 8611。')
+    assert.deepEqual((await evidenceHost.api.manage({ action: 'export' })).backup.records, before)
+} finally { await evidenceHost.close() }
+const evidenceReloaded = startInstance(evidenceConfig, {}, evidenceRoot)
+try {
+    assert.equal((await evidenceReloaded.call('memory_manage', {
+        action: 'expandRecall', id: 'smm_summary', recallId: evidenceId,
+    }, evidenceContext)).code, 'evidence_expired')
+    const recalled = await evidenceReloaded.call('memory_recall', { query: '验收' }, evidenceContext)
+    const expanded = await evidenceReloaded.call('memory_manage', {
+        action: 'expandRecall', id: 'smm_summary', recallId: recalled.evidence.recallId,
+    }, evidenceContext)
+    assert.equal(expanded.items[0].id, 'smm_middle')
+    console.log('逐层取证真实存储验收通过：自动入口、逐层读取、只读与重载重新召回一致。')
+} finally { await evidenceReloaded.close() }

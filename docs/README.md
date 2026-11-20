@@ -34,6 +34,7 @@ source_of_truth: code-and-decision
   - [多层来源追溯与审核时限验收](decisions/memory-source-tracing.md)（decision，active，更新于 2026-11-20）
   - [审核等待时限与短期结果缓存](decisions/memory-review-latency.md)（decision，active，更新于 2026-11-20）
   - [深层概要跨批次再巩固](decisions/memory-reconsolidation.md)（decision，active，更新于 2026-11-20）
+  - [概要后的按需逐层取证](decisions/memory-progressive-recall.md)（decision，active，更新于 2026-11-20）
 
 ### 指南与运维
 

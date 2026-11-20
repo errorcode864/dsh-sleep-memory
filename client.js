@@ -1360,7 +1360,7 @@ window.__ModuleLoader__.load({
 
         /** 运行详情区分持久调度与本次加载计数，零计数默认收起。 */
         function RuntimeStatus({ state, error, sleeping }) {
-          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review]
+          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review, state.recallEvidence]
             .some((counters) => Object.values(counters ?? {}).some((value) => value > 0));
           const infoRow = (label, value) => h('div', { key: label }, h('dt', null, label), h('dd', null, value));
           const counterRow = (label, value) => h('tr', { key: label }, h('th', { scope: 'row' }, label), h('td', null, value));
@@ -1392,7 +1392,7 @@ window.__ModuleLoader__.load({
                       duplicate: '重复注入已跳过', reentry: '同一消息重复进入', disabled: '自动注入已关闭',
                       'review-rejected': '审核拒绝', 'review-timeout': '审核超时', 'review-failed': '审核调用或响应失败',
                       'review-cancelled': '审核已取消', cancelled: '任务已取消', 'scope-changed': '项目范围已改变',
-                      'version-changed': '记忆版本已改变', 'count-budget': '条数预算不足', 'char-budget': '字符预算不足',
+                      'version-changed': '记忆版本已改变', 'turn-changed': '用户轮次已改变', 'count-budget': '条数预算不足', 'char-budget': '字符预算不足',
                       'token-budget': 'Token 预算不足', 'path-rejected': '关联路径未通过', 'audit-capacity': '审计容量不足',
                       'write-failed': '呈现前写入失败', 'pipeline-failed': '召回处理失败',
                       'preference-overridden': '当前要求覆盖或偏好待裁决',
@@ -1419,6 +1419,12 @@ window.__ModuleLoader__.load({
                         `模型实报 ${usage.reported.totalTokens}（缓存读取 ${usage.reported.cacheReadTokens}）；未实报调用估算 ${usage.estimated.totalTokens}；调用 ${usage.calls} 次，失败 ${usage.failed} 次，累计 ${usage.durationMs} 毫秒`)),
                       counterRow('注入 Token 估算', `${state.metrics?.injection.estimatedTokens ?? 0}；对应完整正文估算 ${state.metrics?.injection.sourceEstimatedTokens ?? 0}`),
                       counterRow('按需证据读取', `${state.metrics?.evidence.reads ?? 0} 次，输出估算 ${state.metrics?.evidence.estimatedTokens ?? 0} Token`),
+                      counterRow('逐层取证', `${state.progressiveRecallEnabled ? '已开启' : '已关闭'}；请求 ${state.recallEvidence?.requests ?? 0} 次，返回 ${state.recallEvidence?.returned ?? 0} 条，预算计入 ${state.recallEvidence?.estimatedTokens ?? 0} Token`),
+                      ...(Object.entries(state.recallEvidence?.rejected ?? {}).map(([reason, count]) => counterRow(`取证拒绝：${{
+                        invalid_args: '参数无效', disabled: '功能关闭', evidence_expired: '轮次失效',
+                        evidence_not_offered: '尚未呈现', evidence_scope_changed: '范围变化', evidence_changed: '版本变化',
+                        evidence_depth_limit: '深度上限', evidence_complete: '已展开', evidence_budget_exhausted: '预算用尽',
+                      }[reason] ?? reason}`, `${count} 次`))),
                       counterRow('显式检索', `${state.metrics?.retrieval.queries ?? 0} 次，空结果 ${state.metrics?.retrieval.empty ?? 0} 次，累计 ${state.metrics?.retrieval.durationMs ?? 0} 毫秒，输出估算 ${state.metrics?.retrieval.estimatedTokens ?? 0} Token`))))))
               : !error ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取运行状态…') : null);
         }
@@ -1693,6 +1699,7 @@ window.__ModuleLoader__.load({
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'recallDiagnosticsEnabled', 'semanticRecallEnabled',
           'recallReviewTimeoutMs', 'recallReviewCacheSeconds',
+          'progressiveRecallEnabled', 'recallEvidenceMaxDepth', 'recallEvidenceMaxNodes', 'recallEvidenceMaxEstimatedTokens',
           'sleepAuditEnabled', 'contextualRecallEnabled',
           'sleepAuditMaxBytes',
           'dormancyEnabled', 'reconsolidationEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
@@ -1829,6 +1836,7 @@ window.__ModuleLoader__.load({
             ['contextualRecallEnabled', '情境触发召回', '使用记忆中的具体情境短语补充候选；仍经过相关性审核与预算检查'],
             ['dormancyEnabled', '深层记忆休眠', '需同时开启睡眠审计；长期低强度记忆通过情境或关联路径唤醒'],
             ['reconsolidationEnabled', '深层概要再巩固', '需同时开启睡眠审计；新证据或来源纠正可生成保留历史的新概要'],
+            ['progressiveRecallEnabled', '按需逐层取证', '模型读到概要后可主动展开来源；同轮共享预算且不强化记忆'],
           ]) {
             if (!fields[key]) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
@@ -1886,6 +1894,9 @@ window.__ModuleLoader__.load({
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
             ['recallReviewTimeoutMs', '召回审核等待上限', '单位为毫秒，默认 15000；超时跳过注入，已有显式配置优先'],
             ['recallReviewCacheSeconds', '审核结果缓存时长', '单位为秒，0 关闭；仅同会话、问题、模型和候选版本一致时复用，最多 128 项'],
+            ['recallEvidenceMaxDepth', '取证深度上限', '以本轮呈现的概要为起点，最多沿来源展开多少层'],
+            ['recallEvidenceMaxNodes', '取证来源条数', '同轮多个概要共同使用，重复来源只计一次'],
+            ['recallEvidenceMaxEstimatedTokens', '取证 Token 估算预算', '累计计算成功工具响应的正文、路径和计数，独立于首次注入预算'],
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
             ['sleepAuditMaxBytes', '审计内容容量上限', '单位为字节，0 表示不限；达到上限后暂停新增睡眠批次且保留已有证据'],

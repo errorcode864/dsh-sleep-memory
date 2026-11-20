@@ -4,7 +4,7 @@ import {
 } from './memory-contract.js'
 import { traceMemorySources } from './memory-provenance.js'
 
-const EXTENDED_ACTIONS = ['get', 'traceSources', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
+const EXTENDED_ACTIONS = ['get', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)

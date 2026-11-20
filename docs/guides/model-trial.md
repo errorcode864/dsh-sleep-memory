@@ -39,6 +39,10 @@ npm run eval:model -- --max-calls 18 --report tmp/live-model-evaluation.json
 `eval:preferences` 默认使用当前 15 秒审核时限；可用 `--review-timeout-ms 3000` 对照旧默认值，历史结果见[审核时限验收](../decisions/memory-source-tracing.md#默认-3-秒审核实测)。
 加 `--cache-seconds 60 --repeats 2` 可分别观察首次请求和重复请求，边界与实测见[审核缓存说明](../decisions/memory-review-latency.md)。
 
+`npm run eval:evidence` 只预检配置；加 `--live --max-calls 8` 验证概要足够、需要两层证据和预算不足三个合成场景。
+每次请求最多等待 20 秒，报告默认保存在 `tmp/recall-evidence-model.json`，包含决策、来源 ID 和模型实报 Token。
+模型输出 JSON 决策后由评测脚本调用真实插件工具，此验收不代表宿主原生工具调度。
+
 ## 合成样本与报告
 
 固定 6 个场景覆盖项目约定、短偏好、迁移教训、临时进度、未确认问题和可疑引用。

@@ -123,13 +123,16 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 14)
-        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固']) {
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 15)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固', '按需逐层取证']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
         assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
         assert.equal(inputs.find((node) => node.props['aria-label'] === '召回审核等待上限').props.value, '15000')
         assert.equal(inputs.find((node) => node.props['aria-label'] === '审核结果缓存时长').props.value, '0')
+        assert.equal(inputs.find((node) => node.props['aria-label'] === '取证深度上限').props.value, '3')
+        assert.equal(inputs.find((node) => node.props['aria-label'] === '取证来源条数').props.value, '20')
+        assert.equal(inputs.find((node) => node.props['aria-label'] === '取证 Token 估算预算').props.value, '2000')
         const project = inputs.find((node) => node.props.type === 'text')
         project.props.onChange({ target: { value: '项目甲' } })
         tree = await client.render(component, { view: 'page' })
@@ -499,6 +502,28 @@ test('概要详情可沿真实 Remote 查看前后版本及各版原始来源', 
         tree = await client.render(panel.type, panel.props)
         assert.ok(flatten(tree).some((node) => node.children.includes(host.table.get(current).content)))
         assert.deepEqual([...host.data], before)
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('运行面板展示逐层取证计数及预算拒绝且不包含来源正文', async () => {
+    const host = createHarness({ progressiveRecallEnabled: true, recallEvidenceMaxNodes: 1 })
+    await host.table.put('smm_source', fixture('smm_source', { content: '仅来源包含的私有细节', supersededBy: 'smm_root' }))
+    await host.table.put('smm_root', fixture('smm_root', {
+        layer: 'deep', content: '来源查看的概要', edges: [{ target: 'smm_source', relation: 'consolidates', weight: 1 }],
+    }))
+    const context = { agent: { id: '界面取证会话' } }
+    const recalled = await host.call('memory_recall', { query: '来源查看', limit: 1 }, context)
+    await host.call('memory_manage', { action: 'expandRecall', id: 'smm_root', recallId: recalled.evidence.recallId }, context)
+    await host.call('memory_manage', { action: 'expandRecall', id: 'smm_source', recallId: recalled.evidence.recallId }, context)
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const runtime = flatten(page).find((node) => node.type?.name === 'RuntimeStatus')
+        const tree = await client.render(runtime.type, { state: await host.api.status() })
+        const text = JSON.stringify(tree)
+        assert.ok(text.includes('请求 2 次，返回 1 条'))
+        assert.ok(text.includes('取证拒绝：已展开'))
+        assert.equal(text.includes('仅来源包含的私有细节'), false)
     } finally { client.dispose(); await host.dispose() }
 })
 

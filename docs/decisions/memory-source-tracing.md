@@ -11,7 +11,7 @@ source_of_truth: code-and-script
 # 多层来源追溯与审核时限验收
 
 本批以 `f9d1556` 为基线，完成 C1 的只读来源展开与默认审核时限实测。
-本批不改写概要或事实；后续 C2 已完成[深层再巩固](memory-reconsolidation.md)，自动递进取证仍待 C3。
+本批不改写概要或事实；后续 C2 已完成[深层再巩固](memory-reconsolidation.md)，C3 已完成[模型按需逐层取证](memory-progressive-recall.md)。
 
 ## 只读接口
 

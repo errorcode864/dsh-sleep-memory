@@ -7,7 +7,8 @@
     "test:host": "node tests/host-integration.mjs",
     "bench:search": "node tests/search-benchmark.mjs",
     "eval:model": "node tests/live-model-eval.mjs",
-    "eval:preferences": "node tests/preference-eval.mjs"
+    "eval:preferences": "node tests/preference-eval.mjs",
+    "eval:evidence": "node tests/recall-evidence-eval.mjs"
   },
   "repository": {
     "type": "git",
@@ -40,6 +41,7 @@
     "memory-provenance.js",
     "memory-review-cache.js",
     "memory-reconsolidation.js",
+    "memory-recall-evidence.js",
     "memory-triggers.js",
     "memory-retrieval.js",
     "memory-search-index.js",

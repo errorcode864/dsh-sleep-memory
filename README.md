@@ -234,6 +234,10 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 每次从原始来源重新摘录，保留旧版本及来源路径；没有新证据时不重复建版本。
 原文弹窗可查看前后版本，审计支持中断恢复和预演回滚，边界见[深层再巩固](docs/decisions/memory-reconsolidation.md)。
 
+开启 `progressiveRecallEnabled` 后，模型可在概要不足时调用 `memory_manage expandRecall` 逐层读取来源。
+同一用户轮次共享深度、条数和 Token 预算；跨会话、未发现的 ID 或已变化的来源路径会被拒绝。
+原文预览保持只读，具体接口与预算边界见[按需逐层取证](docs/decisions/memory-progressive-recall.md)。
+
 ### 召回诊断与长期表达偏好
 
 运行面板显示最近 20 次召回的候选、审核、返回数量及过滤原因，区分漏召回、拒绝、超时和预算不足。
@@ -289,6 +293,10 @@ sleep-memory/
 | `archiveDecayHalfLifeDays` | 0 | 归档专用半衰期，0 沿用普通值 |
 | `dormancyEnabled` | false | 开启休眠，要求同时开启 `sleepAuditEnabled` |
 | `reconsolidationEnabled` | false | 根据新增或更新的来源生成深层概要新版本，要求开启睡眠审计 |
+| `progressiveRecallEnabled` | false | 模型在概要不足时主动逐层展开来源 |
+| `recallEvidenceMaxDepth` | 3 | 来源展开最大深度，范围 1 至 8 |
+| `recallEvidenceMaxNodes` | 20 | 当前取证窗口共享的来源条数，最多 100 |
+| `recallEvidenceMaxEstimatedTokens` | 2000 | 取证响应累计 Token 估算预算，范围 300 至 16000 |
 | `dormantAfterDays` | 90 | 进入休眠所需的闲置天数 |
 | `dormantStrengthLine` | 0.15 | 进入休眠所需的强度上限 |
 | `deleteArchiveAfterDays` | 90 | 归档记录触发彻底删除的闲置天数 |
