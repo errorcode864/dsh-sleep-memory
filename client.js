@@ -846,6 +846,7 @@ window.__ModuleLoader__.load({
                   detail.totalSources === 0 ? h('p', { className: 'sm-runtime-note' }, '没有关联来源记录。') : null,
                   ...detail.sources.map((source) => h('div', { className: 'sm-record-history', key: source.id },
                     h('code', null, source.id), h('p', { className: 'sm-record-original' }, source.content)))),
+                h(SourceTracePanel, { rootId: detail.record.id, projectId: detail.record.projectId ?? null, summaryVersion: detail.summaryVersion }),
                 h('div', { className: 'sm-record-pagination' },
                   detail.offset > 0 ? h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: detailBusy, onClick: () => void loadDetail(Math.max(0, detail.offset - 5)) }, '上一页来源') : null,
                   detail.offset + detail.limit < Math.max(detail.totalSources, detail.totalChain)
@@ -856,6 +857,67 @@ window.__ModuleLoader__.load({
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
         const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+
+        /** 多层追溯按需读取且原文展开沿用同一项目范围。 */
+        function SourceTracePanel({ rootId, projectId, summaryVersion }) {
+            const [trace, setTrace] = useState(null);
+            const [original, setOriginal] = useState(null);
+            const [maxDepth, setMaxDepth] = useState(3);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const read = async (action, id) => {
+                setBusy(true);
+                setError('');
+                setOriginal(null);
+                try {
+                    const result = await call('manage', {
+                        action, id, projectId,
+                        ...(action === 'traceSources' ? { maxDepth, maxNodes: 30, maxEstimatedTokens: 3000 } : {}),
+                    });
+                    if (action === 'traceSources') setTrace(result);
+                    if (action === 'get') setOriginal(result);
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '多层来源追溯' },
+                h('h3', null, '多层来源追溯'),
+                summaryVersion?.reason ? h('p', null, `概要版本依据：${summaryVersion.reason}`) : null,
+                ...[['previousId', '读取上一版概要'], ['nextId', '读取下一版概要']].filter(([key]) => summaryVersion?.[key]).map(([key, label]) =>
+                    h('button', { key, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void read('get', summaryVersion[key]) }, label)),
+                h('label', null, '展开深度', h('select', {
+                    'aria-label': '来源展开深度', value: maxDepth, disabled: busy,
+                    onChange: (event) => setMaxDepth(Number(event.target.value)),
+                }, ...[1, 3, 5, 8].map((depth) => h('option', { key: depth, value: depth }, `${depth} 层`)))),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void read('traceSources', rootId) }, '展开多层来源'),
+                busy ? h('p', { role: 'status' }, '正在读取来源…') : null,
+                error ? h('p', { className: 'sm-runtime-error', role: 'alert' }, error) : null,
+                trace ? h('div', null,
+                    h('p', null, `起点 ${trace.rootId} · ${trace.complete ? '遍历完整' : '部分展开'} · ${trace.items.length} 条 · 估算 ${trace.estimatedTokens} Token`),
+                    h('p', { className: 'sm-runtime-note' }, '预览最多 300 字符；完整原文需单独读取，读取不会强化或唤醒记忆。'),
+                    h('p', null, Object.entries(trace.stopped).filter(([, count]) => count > 0).map(([reason, count]) =>
+                        `${{ cycle: '循环引用', duplicate: '重复来源', missing: '来源缺失', scope: '范围不符', depth: '深度上限', nodes: '条数上限', tokens: 'Token 预算', edges: '遍历上限' }[reason]} ${count}`).join('；')),
+                    ...trace.items.map((item) => h('div', { className: 'sm-record-history', key: item.id },
+                        h('code', null, item.path.join(' → ')),
+                        h('p', null, `${item.leaf ? '末端来源' : '含下层来源'} · ${STATE_LABELS[item.state]}${item.current ? '' : ' · 历史或无效版本'}${item.accessState === 'dormant' ? ' · 休眠' : ''}`),
+                        h('p', { className: 'sm-record-original' }, `${item.content}${item.truncated ? '…（预览已截断）' : ''}`),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            'aria-label': `读取来源原文 ${item.id}`, onClick: () => void read('get', item.id) }, '读取来源原文'),
+                        !item.leaf ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            'aria-label': `继续追溯 ${item.id}`, onClick: () => void read('traceSources', item.id) }, '从此记录继续追溯') : null))) : null,
+                original ? h('div', { className: 'sm-record-history', 'aria-label': '来源完整原文' },
+                    h('code', null, original.record.id), h('p', { className: 'sm-record-original' }, original.record.content),
+                    original.summaryVersion?.reason ? h('p', null, original.summaryVersion.reason) : null,
+                    ...[['previousId', '继续读取上一版'], ['nextId', '继续读取下一版']].filter(([key]) => original.summaryVersion?.[key]).map(([key, label]) =>
+                        h('button', { key, type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void read('get', original.summaryVersion[key]) }, label)),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                        onClick: () => void read('traceSources', original.record.id) }, '追溯此版本来源')) : null);
+        }
 
         /** 反馈绑定实际呈现的版本，事实状态仍由管理入口核对后修改。 */
         function FeedbackPanel({ detail, onChanged }) {
@@ -1229,6 +1291,8 @@ window.__ModuleLoader__.load({
           const title = report.dryRun === true ? t('sleep-memory.sleep.previewDone') : t('sleep-memory.sleep.done');
           const phases = [
             t('sleep-memory.sleep.phase.consolidate', { n: report.consolidatedCount ?? 0 }),
+            ...(report.reconsolidatedCount !== undefined ? [`再巩固 ${report.reconsolidatedCount}`] : []),
+            ...(report.reconsolidationSkippedCount ? [`再巩固跳过 ${report.reconsolidationSkippedCount}`] : []),
             t('sleep-memory.sleep.phase.archive', { n: report.archivedCount ?? 0 }),
             ...(report.dormantCount !== undefined ? [`进入休眠 ${report.dormantCount}`] : []),
             t('sleep-memory.sleep.phase.forget', { n: report.deletedCount ?? 0 }),
@@ -1315,6 +1379,11 @@ window.__ModuleLoader__.load({
                 h('summary', null, '最近召回结果'),
                 ...(state.metrics?.recentRecalls ?? []).slice().reverse().map((trace, index) => h('div', { key: index },
                   h('p', null, `${formatRuntimeTime(trace.at)} · ${trace.mode === 'automatic' ? '自动注入' : '显式检索'} · 候选 ${trace.candidateCount} · 通过 ${trace.approvedCount ?? 0} · 返回 ${trace.returnedIds.length} · ${trace.durationMs} 毫秒`),
+                  trace.diagnostics?.reviewDurationMs !== undefined ? h('p', null,
+                    `审核 ${trace.diagnostics.reviewDurationMs} 毫秒 · ${{
+                      hit: '复用已完成审核', miss: '重新请求审核', disabled: '审核缓存已关闭',
+                      'no-session': '无稳定会话，未使用缓存', 'not-stored': '审核未完成，未缓存', 'not-used': '本次无需审核',
+                    }[trace.diagnostics.reviewCache]}`) : null,
                   trace.diagnostics ? h('p', null, Object.entries(trace.diagnostics.reasons).map(([reason, count]) =>
                     `${{
                       'empty-store': '记忆库为空', 'no-eligible': '没有符合范围的记忆', 'no-query-terms': '缺少有效查询词',
@@ -1339,6 +1408,7 @@ window.__ModuleLoader__.load({
                       counterRow('情绪评分', `已尝试 ${state.scoring?.attempted ?? 0} 次，写入 ${state.scoring?.stored ?? 0} 条，跳过 ${state.scoring?.skipped ?? 0} 次，失败 ${state.scoring?.failed ?? 0} 次`),
                       counterRow('自主学习', `写入 ${state.learning?.stored ?? 0} 条，重复 ${state.learning?.duplicates ?? 0} 条，待复核 ${state.learning?.reviewRequired ?? 0} 条，失败 ${state.learning?.failed ?? 0} 次；${state.learning?.lastReason ?? '尚未运行'}`),
                       counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
+                      counterRow('审核等待与缓存', `上限 ${state.recallReviewTimeoutMs ?? 0} 毫秒 · 超时 ${state.review?.timeouts ?? 0} 次 · 缓存命中 ${state.review?.cache?.hits ?? 0} 次 · 未命中 ${state.review?.cache?.misses ?? 0} 次 · 保留 ${state.review?.cache?.entries ?? 0} 项`),
                       counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
                       counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
                       counterRow('本地分词缓存', `复用 ${state.searchIndex?.reused ?? 0} 条，重建 ${state.searchIndex?.rebuilt ?? 0} 条，缓存 ${state.searchIndex?.cached ?? 0} 条`),
@@ -1622,9 +1692,10 @@ window.__ModuleLoader__.load({
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'recallDiagnosticsEnabled', 'semanticRecallEnabled',
+          'recallReviewTimeoutMs', 'recallReviewCacheSeconds',
           'sleepAuditEnabled', 'contextualRecallEnabled',
           'sleepAuditMaxBytes',
-          'dormancyEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
+          'dormancyEnabled', 'reconsolidationEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
           'preferenceRecallEnabled',
           'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
@@ -1757,6 +1828,7 @@ window.__ModuleLoader__.load({
             ['sleepAuditEnabled', '睡眠审计与回滚', '保留批次修改证据并暂停物理遗忘；可在记忆管理中预演回滚'],
             ['contextualRecallEnabled', '情境触发召回', '使用记忆中的具体情境短语补充候选；仍经过相关性审核与预算检查'],
             ['dormancyEnabled', '深层记忆休眠', '需同时开启睡眠审计；长期低强度记忆通过情境或关联路径唤醒'],
+            ['reconsolidationEnabled', '深层概要再巩固', '需同时开启睡眠审计；新证据或来源纠正可生成保留历史的新概要'],
           ]) {
             if (!fields[key]) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
@@ -1812,6 +1884,8 @@ window.__ModuleLoader__.load({
             ['injectMaxTotalChars', '注入总字符预算', '包含标题、来源和关联内容，超过预算的条目不注入'],
             ['injectMaxEstimatedTokens', '注入 Token 估算预算', '与字符预算同时生效，估算不等于模型计费 Token'],
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
+            ['recallReviewTimeoutMs', '召回审核等待上限', '单位为毫秒，默认 15000；超时跳过注入，已有显式配置优先'],
+            ['recallReviewCacheSeconds', '审核结果缓存时长', '单位为秒，0 关闭；仅同会话、问题、模型和候选版本一致时复用，最多 128 项'],
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
             ['sleepAuditMaxBytes', '审计内容容量上限', '单位为字节，0 表示不限；达到上限后暂停新增睡眠批次且保留已有证据'],

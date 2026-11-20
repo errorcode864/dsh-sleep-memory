@@ -2,8 +2,9 @@ import {
     createMemoryId, createRecordView, exportMemoryBackup, getProjectId, matchesProject,
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
+import { traceMemorySources } from './memory-provenance.js'
 
-const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
+const EXTENDED_ACTIONS = ['get', 'traceSources', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)
@@ -15,6 +16,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         ? feedback.submit(args, trustedFeedback) : { code: 'disabled', message: '反馈记录尚未开启' }
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
+        traceSources: ['action', 'id', 'projectId', 'maxDepth', 'maxNodes', 'maxEstimatedTokens'],
         correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt', 'recallTriggers'],
         export: ['action', 'includeAudit'],
         import: ['action', 'backup', 'dryRun'],
@@ -61,10 +63,21 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     }
     if (typeof args.id !== 'string' || !args.id) return invalid('必须提供记忆 ID')
     const record = table.get(args.id)
-    if (!record || !matchesProject(record, args.projectId, args.action === 'get')) {
+    if (!record || !matchesProject(record, args.projectId, ['get', 'traceSources'].includes(args.action))) {
         return { code: 'not_found', message: '指定范围内未找到这条记忆' }
     }
     const view = createRecordView([...table.entries()])
+    if (args.action === 'traceSources') {
+        const limits = {
+            maxDepth: args.maxDepth === undefined ? 3 : args.maxDepth,
+            maxNodes: args.maxNodes === undefined ? 30 : args.maxNodes,
+            maxEstimatedTokens: args.maxEstimatedTokens === undefined ? 2000 : args.maxEstimatedTokens,
+        }
+        for (const [key, min, max] of [['maxDepth', 1, 8], ['maxNodes', 1, 100], ['maxEstimatedTokens', 300, 16000]]) {
+            if (!Number.isInteger(limits[key]) || limits[key] < min || limits[key] > max) return invalid(`${key} 必须为 ${min} 至 ${max} 的整数`)
+        }
+        return traceMemorySources(record, view, limits)
+    }
     const root = view.rootOf(record)
     const chain = [...view.byId.values()].filter((item) => view.rootOf(item).id === root.id)
     if (args.action === 'get') {
@@ -74,8 +87,13 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
             return invalid('来源分页要求 offset ≥ 0，limit 为 1 至 100 的整数')
         }
         const ids = record.edges.filter((edge) => edge.relation === 'consolidates').map((edge) => edge.target)
+        const revision = record.edges.find((edge) => edge.relation === 'revises')
         return {
             action: 'get', record, current: view.isCurrent(record), replacedBy: view.replacedBy.get(record.id) ?? null,
+            ...(record.layer === 'deep' ? { summaryVersion: {
+                previousId: revision?.target ?? null, nextId: view.summaryReplacedBy.get(record.id) ?? null,
+                reason: revision?.reason ?? null,
+            } } : {}),
             ...(feedback ? await feedback.detail(record, view.lifecycleOf(record), view.isCurrent(record)) : {}),
             sources: ids.slice(offset, offset + limit).map((id) => table.get(id)).filter(Boolean),
             totalSources: ids.length, offset, limit,

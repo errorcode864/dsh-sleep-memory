@@ -123,11 +123,13 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await client.render(component, { view: 'page' }, true)
         let tree = await client.render(component, { view: 'page' })
         const inputs = flatten(tree).filter((node) => node.type === 'input')
-        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 13)
-        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回']) {
+        assert.equal(inputs.filter((node) => node.props.type === 'checkbox').length, 14)
+        for (const label of ['自主学习有用信息', '召回相关性审核', '同义查询扩展', '记录召回与用户反馈', '反馈参与排序', '睡眠审计与回滚', '情境触发召回', '深层概要再巩固']) {
             assert.ok(flatten(tree).some((node) => node.type === 'span' && node.children.includes(label)))
         }
         assert.ok(inputs.some((node) => node.props['aria-label'] === '注入 Token 估算预算'))
+        assert.equal(inputs.find((node) => node.props['aria-label'] === '召回审核等待上限').props.value, '15000')
+        assert.equal(inputs.find((node) => node.props['aria-label'] === '审核结果缓存时长').props.value, '0')
         const project = inputs.find((node) => node.props.type === 'text')
         project.props.onChange({ target: { value: '项目甲' } })
         tree = await client.render(component, { view: 'page' })
@@ -160,6 +162,11 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await host.api.setConfig({ changes: { recallDiagnosticsEnabled: false, preferenceRecallEnabled: true } })
         assert.equal(override.recallDiagnosticsEnabled, false)
         assert.equal(override.preferenceRecallEnabled, true)
+        await host.api.setConfig({ changes: { recallReviewTimeoutMs: 18000, recallReviewCacheSeconds: 60 } })
+        assert.equal(override.recallReviewTimeoutMs, 18000)
+        assert.equal(override.recallReviewCacheSeconds, 60)
+        await assert.rejects(host.api.setConfig({ changes: { recallReviewTimeoutMs: 499 } }), /recallReviewTimeoutMs/)
+        await assert.rejects(host.api.setConfig({ changes: { recallReviewCacheSeconds: 301 } }), /recallReviewCacheSeconds/)
         await assert.rejects(host.api.setConfig({ changes: { sleepAuditEnabled: false } }), /sleepAuditEnabled/)
         await assert.rejects(host.api.setConfig({ changes: { sleepAuditMaxBytes: -1 } }), /sleepAuditMaxBytes/)
     } finally { client.dispose() }
@@ -389,6 +396,110 @@ test('列表原文按钮调用新 Remote 方法，运行状态面板可读', asy
             assert.ok(flatten(statusTree).some((node) => node.type === 'th' && node.children.includes(label)))
         }
     } finally { client.dispose() }
+})
+
+test('来源面板沿真实 Remote 展开多层路径并读取原文且保持只读', async () => {
+    const host = createHarness()
+    await host.table.put('smm_leaf', fixture('smm_leaf', { projectId: '甲', content: '完整证据内容。'.repeat(80) }))
+    await host.table.put('smm_mid', fixture('smm_mid', {
+        projectId: '甲', layer: 'deep', edges: [{ target: 'smm_leaf', relation: 'consolidates', weight: 1 }],
+    }))
+    await host.table.put('smm_root', fixture('smm_root', {
+        projectId: '甲', layer: 'deep', edges: [{ target: 'smm_mid', relation: 'consolidates', weight: 1 }],
+    }))
+    const before = structuredClone([...host.data])
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const row = flatten(page).find((node) => node.type?.name === 'RecordRow' && node.props.item.id === 'smm_root')
+        let detail = await client.render(row.type, row.props)
+        flatten(detail).find((node) => node.type === 'button' && node.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        detail = await client.render(row.type, row.props)
+        const panel = flatten(detail).find((node) => node.type?.name === 'SourceTracePanel')
+        let tree = await client.render(panel.type, panel.props)
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('展开多层来源')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(JSON.stringify(tree).includes('smm_root → smm_mid → smm_leaf'))
+        assert.ok(client.calls.some((entry) => entry.method === 'manage' && entry.args[0].action === 'traceSources' && entry.args[0].projectId === '甲'))
+        flatten(tree).find((node) => node.props['aria-label'] === '读取来源原文 smm_leaf').props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(JSON.stringify(tree).includes(host.table.get('smm_leaf').content))
+        flatten(tree).find((node) => node.props['aria-label'] === '继续追溯 smm_mid').props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(JSON.stringify(tree).includes('smm_mid → smm_leaf'))
+        assert.deepEqual([...host.data], before)
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('审核缓存命中和耗时在运行面板中展示', async () => {
+    const host = createHarness({ recallReviewEnabled: true, recallReviewCacheSeconds: 60, injectRepeatAfterTurns: 0 }, {
+        llm: { prepareCall: async () => ({
+            config: {},
+            stream: async function* () {
+                yield { type: 'text-delta', text: '{"decisions":[{"id":"smm_rule","useful":true,"reason":"部署约定适用"}]}' }
+                yield { type: 'finish', reason: { kind: 'stop' } }
+            },
+        }) },
+    })
+    await host.table.put('smm_rule', fixture('smm_rule'))
+    for (let index = 0; index < 2; index += 1) await injectMessage(host, createMessage('部署约定 UNIQUE_42', `查询-${index}`), { agent: { id: '面板会话' } })
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const runtime = flatten(page).find((node) => node.type?.name === 'RuntimeStatus')
+        const tree = await client.render(runtime.type, { state: await host.api.status() })
+        const text = JSON.stringify(tree)
+        assert.ok(text.includes('复用已完成审核'))
+        assert.ok(text.includes('缓存命中 1 次'))
+        assert.ok(text.includes('上限 15000 毫秒'))
+        assert.ok(!text.includes('UNIQUE_42'))
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('概要详情可沿真实 Remote 查看前后版本及各版原始来源', async () => {
+    const host = createHarness({ sleepAuditEnabled: true, reconsolidationEnabled: true })
+    for (const id of ['smm_a', 'smm_b']) await host.table.put(id, fixture(id, { strength: 0.4 }))
+    const first = (await host.call('memory_sleep', {})).consolidated[0].deepId
+    await host.table.put('smm_c', fixture('smm_c', { strength: 0.4 }))
+    const current = (await host.call('memory_sleep', {})).reconsolidated[0].deepId
+    const before = structuredClone([...host.data])
+    const client = await createClient(host)
+    try {
+        const main = client.components.get('main')
+        await client.render(main, {}, true)
+        const page = await client.render(main)
+        const row = flatten(page).find((node) => node.type?.name === 'RecordRow' && node.props.item.id === current)
+        let detail = await client.render(row.type, row.props)
+        flatten(detail).find((node) => node.type === 'button' && node.children.includes('查看原文与来源')).props.onClick()
+        await flushTasks()
+        detail = await client.render(row.type, row.props)
+        const panel = flatten(detail).find((node) => node.type?.name === 'SourceTracePanel')
+        let tree = await client.render(panel.type, panel.props)
+        assert.ok(JSON.stringify(tree).includes('概要版本依据'))
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('读取上一版概要')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.includes(host.table.get(first).content)))
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('追溯此版本来源')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(JSON.stringify(tree).includes(`${first} → smm_a`))
+        assert.equal(JSON.stringify(tree).includes(`${first} → smm_c`), false)
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('读取上一版概要')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        flatten(tree).find((node) => node.type === 'button' && node.children.includes('继续读取下一版')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.includes(host.table.get(current).content)))
+        assert.deepEqual([...host.data], before)
+    } finally { client.dispose(); await host.dispose() }
 })
 
 test('原文反馈面板调用真实 Remote 写入并撤回明确用户反馈', async () => {

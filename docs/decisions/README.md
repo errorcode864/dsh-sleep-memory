@@ -18,6 +18,9 @@ source_of_truth: decision
 - [分层衰减、休眠与偏好召回](memory-dormancy.md)
 - 待实施：[休眠之后的开发路线](memory-next-plan.md)
 - [召回诊断与长期表达偏好](memory-recall-preferences.md)
+- [多层来源追溯与审核时限验收](memory-source-tracing.md)
+- [审核等待时限与短期结果缓存](memory-review-latency.md)
+- [深层概要跨批次再巩固](memory-reconsolidation.md)
 - 已停止：[Embedding 混合检索草案](memory-hybrid-learning.md)
 - [文档索引](../README.md)
 
@@ -37,4 +40,7 @@ source_of_truth: decision
 | decision | [分层衰减、休眠与偏好召回](memory-dormancy.md) | active | 2026-11-20 |
 | decision | [休眠之后的开发路线](memory-next-plan.md) | draft | 2026-11-20 |
 | decision | [召回诊断与长期表达偏好](memory-recall-preferences.md) | active | 2026-11-20 |
+| decision | [多层来源追溯与审核时限验收](memory-source-tracing.md) | active | 2026-11-20 |
+| decision | [审核等待时限与短期结果缓存](memory-review-latency.md) | active | 2026-11-20 |
+| decision | [深层概要跨批次再巩固](memory-reconsolidation.md) | active | 2026-11-20 |
 <!-- DOCS-INDEX:END -->

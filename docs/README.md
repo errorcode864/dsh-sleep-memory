@@ -31,11 +31,14 @@ source_of_truth: code-and-decision
   - [分层衰减、休眠与偏好召回](decisions/memory-dormancy.md)（decision，active，更新于 2026-11-20）
   - [休眠之后的开发路线](decisions/memory-next-plan.md)（decision，draft，更新于 2026-11-20）
   - [召回诊断与长期表达偏好](decisions/memory-recall-preferences.md)（decision，active，更新于 2026-11-20）
+  - [多层来源追溯与审核时限验收](decisions/memory-source-tracing.md)（decision，active，更新于 2026-11-20）
+  - [审核等待时限与短期结果缓存](decisions/memory-review-latency.md)（decision，active，更新于 2026-11-20）
+  - [深层概要跨批次再巩固](decisions/memory-reconsolidation.md)（decision，active，更新于 2026-11-20）
 
 ### 指南与运维
 
 - [进入指南与运维领域索引](guides/README.md)
   - [npm 发布与远端更新](guides/package-updates.md)（runbook，active，更新于 2026-11-10）
-  - [可靠记忆使用与验证](guides/reliability.md)（guide，active，更新于 2026-11-17）
+  - [可靠记忆使用与验证](guides/reliability.md)（guide，active，更新于 2026-11-20）
   - [真实模型评测与单项目试用](guides/model-trial.md)（guide，active，更新于 2026-11-20）
 <!-- DOCS-INDEX:END -->

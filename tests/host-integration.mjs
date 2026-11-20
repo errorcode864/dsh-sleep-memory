@@ -16,7 +16,7 @@ const testRoot = resolve(import.meta.dirname, '../tmp')
 await mkdir(testRoot, { recursive: true })
 const root = await mkdtemp(resolve(testRoot, 'host-integration-'))
 
-function startInstance(config = {}, failure = {}, storageRoot = root) {
+function startInstance(config = {}, failure = {}, storageRoot = root, llm) {
     const backend = new JsonStorageBackend(storageRoot)
     const facility = new DomainFacility({
         storage: { backend: { get: () => backend } },
@@ -51,7 +51,7 @@ function startInstance(config = {}, failure = {}, storageRoot = root) {
         effect: (effect) => { cleanups.push(effect()) },
         on: (name, handler) => handlers.set(name, handler),
         get: () => undefined,
-        llm: {
+        llm: llm ?? {
             prepareCall: async () => ({
                 config: {},
                 stream: async function* () {
@@ -302,3 +302,107 @@ try {
     assert.equal((await preferenceReloaded.api.getRecord({ id: 'smm_language' })).record.content, '以后回复使用中文。')
     console.log('偏好真实存储验收通过：重载应用、临时覆盖、后续恢复及诊断一致。')
 } finally { await preferenceReloaded.close() }
+
+const sourceRoot = await mkdtemp(resolve(testRoot, 'host-sources-'))
+const sourceHost = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, sourceRoot)
+try {
+    const sources = [
+        fixture('smm_origin', { projectId: '证据项目', content: '最初的字符集检查证据', supersededBy: 'smm_summary' }),
+        fixture('smm_summary', { projectId: '证据项目', layer: 'deep', supersededBy: 'smm_root',
+            edges: [{ target: 'smm_origin', relation: 'consolidates', weight: 1 }] }),
+        fixture('smm_root', { projectId: '证据项目', layer: 'deep',
+            edges: [{ target: 'smm_summary', relation: 'consolidates', weight: 1 }] }),
+    ]
+    await sourceHost.api.manage({ action: 'import', dryRun: false, backup: exportMemoryBackup(new Map(sources.map((record) => [record.id, record]))) })
+} finally { await sourceHost.close() }
+const sourceReloaded = startInstance({ autoLearnEnabled: false, sleepIntervalMinutes: 0 }, {}, sourceRoot)
+try {
+    const before = (await sourceReloaded.api.manage({ action: 'export' })).backup.records
+    const trace = await sourceReloaded.api.manage({ action: 'traceSources', id: 'smm_root', projectId: '证据项目' })
+    assert.deepEqual(trace.items[1].path, ['smm_root', 'smm_summary', 'smm_origin'])
+    assert.equal(trace.complete, true)
+    assert.equal((await sourceReloaded.api.manage({ action: 'get', id: 'smm_origin', projectId: '证据项目' })).record.content, '最初的字符集检查证据')
+    assert.deepEqual((await sourceReloaded.api.manage({ action: 'export' })).backup.records, before)
+    console.log('多层来源真实存储验收通过：重载后路径、原文和只读状态一致。')
+} finally { await sourceReloaded.close() }
+
+const cacheRoot = await mkdtemp(resolve(testRoot, 'host-review-cache-'))
+const cacheConfig = {
+    autoLearnEnabled: false, recallReviewEnabled: true, recallReviewCacheSeconds: 60,
+    injectRepeatAfterTurns: 0, sleepIntervalMinutes: 0,
+}
+const cacheCalls = { count: 0 }
+const cacheModel = {
+    prepareCall: async () => ({
+        config: {},
+        stream: async function* () {
+            cacheCalls.count += 1
+            yield { type: 'text-delta', text: '{"decisions":[{"id":"smm_cache","useful":true,"reason":"部署约定适用"}]}' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+    }),
+}
+for (const round of [0, 1]) {
+    const cacheHost = startInstance(cacheConfig, {}, cacheRoot, cacheModel)
+    try {
+        if (round === 0) await cacheHost.api.manage({
+            action: 'import', dryRun: false, backup: exportMemoryBackup(new Map([
+                ['smm_cache', fixture('smm_cache')],
+            ])),
+        })
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            const message = { id: `缓存轮次-${round}-${attempt}`, role: 'user', source: { kind: 'user' },
+                content: [{ type: 'text', text: '部署约定 UNIQUE_42' }] }
+            const response = await cacheHost.handlers.get('agent/pre-step')({
+                step: 1, messages: [message], agent: { id: '审核缓存会话' }, modelSelection: { provider: 'mock', model: 'mock' },
+            }, async () => ({ kind: 'enter', messages: [message] }))
+            assert.equal(response.messages.length, 2)
+        }
+        const status = await cacheHost.api.status()
+        assert.equal(status.recallReviewTimeoutMs, 15000)
+        assert.equal(status.review.cache.hits, 1)
+        assert.equal(status.metrics.models.review.calls, 1)
+    } finally { await cacheHost.close() }
+}
+assert.equal(cacheCalls.count, 2)
+console.log('审核缓存真实存储验收通过：同实例复用且重载重新审核。')
+
+const revisionRoot = await mkdtemp(resolve(testRoot, 'host-reconsolidation-'))
+const revisionConfig = { autoLearnEnabled: false, sleepIntervalMinutes: 0, reconsolidationEnabled: true }
+const revisionHost = startInstance(revisionConfig, {}, revisionRoot)
+let previousSummaryId
+let revisionBatchId
+let revisedSummaryId
+try {
+    const sources = ['smm_original_a', 'smm_original_b'].map((id) => fixture(id, { strength: 0.4 }))
+    await revisionHost.api.manage({
+        action: 'import', dryRun: false, backup: exportMemoryBackup(new Map(sources.map((record) => [record.id, record]))),
+    })
+    previousSummaryId = (await revisionHost.call('memory_sleep', {})).consolidated[0].deepId
+    await revisionHost.api.manage({
+        action: 'import', dryRun: false, backup: exportMemoryBackup(new Map([
+            ['smm_new_evidence', fixture('smm_new_evidence', { strength: 0.4 })],
+        ])),
+    })
+    const result = await revisionHost.call('memory_sleep', {})
+    revisionBatchId = result.auditId
+    revisedSummaryId = result.reconsolidated[0].deepId
+} finally { await revisionHost.close() }
+const revisionReloaded = startInstance(revisionConfig, {}, revisionRoot)
+try {
+    assert.equal((await revisionReloaded.api.getRecord({ id: previousSummaryId })).summaryVersion.nextId, revisedSummaryId)
+    const current = await revisionReloaded.api.getRecord({ id: revisedSummaryId })
+    assert.equal(current.summaryVersion.previousId, previousSummaryId)
+    assert.equal(current.current, true)
+    const trace = await revisionReloaded.api.manage({ action: 'traceSources', id: revisedSummaryId })
+    assert.deepEqual(new Set(trace.items.map((item) => item.id)), new Set(['smm_original_a', 'smm_original_b', 'smm_new_evidence']))
+    const plan = await revisionReloaded.api.manage({ action: 'sleepRollback', batchId: revisionBatchId })
+    await revisionReloaded.api.manage({ action: 'sleepRollback', batchId: revisionBatchId, dryRun: false, planToken: plan.planToken })
+} finally { await revisionReloaded.close() }
+const revisionRestored = startInstance(revisionConfig, {}, revisionRoot)
+try {
+    assert.equal((await revisionRestored.api.getRecord({ id: previousSummaryId })).current, true)
+    assert.equal((await revisionRestored.api.getRecord({ id: revisedSummaryId })).current, false)
+    assert.equal((await revisionRestored.api.getRecord({ id: 'smm_new_evidence' })).record.supersededBy, null)
+    console.log('深层再巩固真实存储验收通过：版本与原文重载、批次回滚及再次重载一致。')
+} finally { await revisionRestored.close() }

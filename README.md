@@ -145,6 +145,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 - **`memory_write`**：写入事实或经历，支持项目范围（`projectId`）、来源溯源与事件时间；显著情绪记忆需通过效价/唤醒度阈值。
 - **`memory_recall`**：BM25 检索 + salience 加成；沿 REM 联想边扩散激活带出关联记忆（附 `via` 标注，不计入强化）；支持 `since`/`until` 时间窗与 `timeField: "occurredAt"` 事件范围检索。
 - **先摘要再读证据**：默认 `fidelity: "summary"` 返回相关原句和记忆 ID，省略内容时标注 `truncated`；`memory_manage get` 按 ID 读取完整原文、学习证据与纠正链，`recall` 和 `raw` 保留原有呈现方式。
+- **多层来源追溯**：`memory_manage traceSources` 按巩固关系展开来源路径，限制深度、条数和 Token 估算；原文弹窗可逐层展开和单独读取完整证据，详见[来源追溯说明](docs/decisions/memory-source-tracing.md)。
 - **消耗可见**：运行详情分别统计学习、审核、查询扩展和情绪评分的模型实报 Token 与字符估算，自动注入同时受字符预算和 Token 估算预算限制。
 
 ### 睡眠整理（memory_sleep）
@@ -171,7 +172,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
   salient 记忆；已有情绪记忆和显式写入不受影响。
 
 学习和审核使用当前会话的模型路由，会增加模型调用。学习不阻塞主对话，
-审核默认最多等待 3 秒。记忆银行的运行状态可查看写入、重复、待复核、审核拒绝和失败原因。
+审核默认最多等待 15 秒，已有显式时限继续生效。记忆银行的运行状态可查看写入、重复、待复核、审核拒绝和失败原因。
 详细范围、证据与运行边界见[可靠记忆使用与验证](docs/guides/reliability.md)。
 
 单字和数字不再统一丢弃：独立术语与明确的端口、状态码、字段赋值仍可参与召回。
@@ -227,6 +228,12 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 情境召回同时补充有用户证据的回复语言偏好，支持“简体中文回复”与“使用哪种语言”等问法差异。
 此规则不覆盖任意同义句，候选仍需经过既有范围与审核流程。
 
+### 深层概要再巩固（可选）
+
+开启 `reconsolidationEnabled` 和睡眠审计后，同主题新证据或来源纠正可生成概要的新版本。
+每次从原始来源重新摘录，保留旧版本及来源路径；没有新证据时不重复建版本。
+原文弹窗可查看前后版本，审计支持中断恢复和预演回滚，边界见[深层再巩固](docs/decisions/memory-reconsolidation.md)。
+
 ### 召回诊断与长期表达偏好
 
 运行面板显示最近 20 次召回的候选、审核、返回数量及过滤原因，区分漏召回、拒绝、超时和预算不足。
@@ -234,6 +241,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 `preferenceRecallEnabled` 默认关闭，开启后可在普通任务中应用有用户证据的语言、详略和格式偏好。
 当前明确要求覆盖本轮偏好，后续恢复长期偏好；项目偏好优先且冲突不自动裁决。
 范围、审核与预算继续生效，详细规则和评测边界见[召回诊断与长期表达偏好](docs/decisions/memory-recall-preferences.md)。
+配置页可调整审核时限和 `recallReviewCacheSeconds`，缓存默认关闭；开启后同会话、同问题、同版本候选可短期复用审核结果，见[审核等待与缓存](docs/decisions/memory-review-latency.md)。
 
 ---
 
@@ -280,6 +288,7 @@ sleep-memory/
 | `deepDecayHalfLifeDays` | 0 | 深层专用半衰期，0 沿用普通值 |
 | `archiveDecayHalfLifeDays` | 0 | 归档专用半衰期，0 沿用普通值 |
 | `dormancyEnabled` | false | 开启休眠，要求同时开启 `sleepAuditEnabled` |
+| `reconsolidationEnabled` | false | 根据新增或更新的来源生成深层概要新版本，要求开启睡眠审计 |
 | `dormantAfterDays` | 90 | 进入休眠所需的闲置天数 |
 | `dormantStrengthLine` | 0.15 | 进入休眠所需的强度上限 |
 | `deleteArchiveAfterDays` | 90 | 归档记录触发彻底删除的闲置天数 |
@@ -294,7 +303,8 @@ sleep-memory/
 | `recallReviewEnabled` | true | 自动注入前审核任务相关性 |
 | `recallDiagnosticsEnabled` | true | 最近 20 次召回的阶段诊断，不改变候选和排序 |
 | `preferenceRecallEnabled` | false | 普通任务应用语言、详略和格式偏好 |
-| `recallReviewTimeoutMs` | 3000 | 召回审核等待上限，单位毫秒 |
+| `recallReviewTimeoutMs` | 15000 | 召回审核等待上限，单位毫秒，已有显式值继续生效 |
+| `recallReviewCacheSeconds` | 0 | 同会话审核缓存有效秒数，0 关闭，最多 300 秒、128 项 |
 | `recallCandidateBudget` | 12 | 审核前的直接候选数量，与最终注入预算分开 |
 | `injectMinScore` | 0.2 | 词与实体加权后的 BM25 候选门槛，不代表相关概率 |
 | `salientScoringEnabled` | false | 可选的原始情绪评分沉淀 |

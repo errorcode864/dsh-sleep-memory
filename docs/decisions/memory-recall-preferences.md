@@ -79,7 +79,7 @@ node --env-file=tmp/live-model.env tests/preference-eval.mjs --live --enabled --
 本批 smoke 73 个场景和 Node 测试 188 项通过，文档索引及打包检查通过。
 规范扫描保留一处既有 `RISK-PII-001` 误报：学习提示词的“不要记完整日志、密码、Token”触发关键词共现，人工核对没有实际敏感数据输出。
 
-真实样本有限；评测审核超时为 30 秒，生产默认仍为 3 秒，延迟与费用需在单项目试用中继续观察。
+A、B 验收时质量评测审核超时为 30 秒，生产默认当时为 3 秒；后续调整见[审核等待时限与短期结果缓存](memory-review-latency.md)。
 本批未改个人 profile，浏览器视觉验收与真实项目 30 轮标注仍未完成。
 
 [模型试用指南](../guides/model-trial.md) · [返回决策索引](README.md)

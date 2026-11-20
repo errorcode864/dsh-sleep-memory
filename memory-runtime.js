@@ -110,7 +110,10 @@ export function memoryVersion(record, lifecycle, includeEvidence = false) {
         replaces: record.replaces, layer: record.layer,
         recallTriggers: record.recallTriggers,
         access: record.access,
-        ...(includeEvidence ? { learning: record.learning } : {}),
+        ...(includeEvidence ? {
+            learning: record.learning, supersededBy: record.supersededBy,
+            sources: record.edges.filter((edge) => ['consolidates', 'revises'].includes(edge.relation)),
+        } : {}),
     })
 }
 

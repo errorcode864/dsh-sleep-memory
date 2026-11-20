@@ -35,7 +35,9 @@ npm run eval:model -- --max-calls 18 --report tmp/live-model-evaluation.json
 
 默认最多 18 次请求，每次最多请求 2400 个输出 Token，达到调用上限后明确失败。
 报告记录服务端实报 Token 与本地字符估算，未配置价格表时不换算金额。
-学习超时为 60 秒，审核超时为 30 秒，评测配置不修改插件默认值。
+`eval:model` 的学习超时为 60 秒，审核超时为 30 秒，质量评测配置不修改个人 profile。
+`eval:preferences` 默认使用当前 15 秒审核时限；可用 `--review-timeout-ms 3000` 对照旧默认值，历史结果见[审核时限验收](../decisions/memory-source-tracing.md#默认-3-秒审核实测)。
+加 `--cache-seconds 60 --repeats 2` 可分别观察首次请求和重复请求，边界与实测见[审核缓存说明](../decisions/memory-review-latency.md)。
 
 ## 合成样本与报告
 

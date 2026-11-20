@@ -4,7 +4,7 @@ title: 可靠记忆使用与验证
 type: guide
 status: active
 owner: maintainer
-updated: 2026-11-17
+updated: 2026-11-20
 source_of_truth: code-and-script
 ---
 
@@ -68,6 +68,9 @@ source_of_truth: code-and-script
 推断事实真实性。经历建议记录情境、行动、结果、适用条件，事实保持精确。
 
 ## 本地检索、学习与反馈
+
+深层概要可额外开启 `reconsolidationEnabled` 与 `sleepAuditEnabled`，在新证据或来源纠正后生成新版本。
+在原文弹窗中读取前后版本和各版证据，通过睡眠审计预演回滚，具体限制见[深层再巩固](../decisions/memory-reconsolidation.md)。
 
 本地检索不调用嵌入模型且不增加模型依赖，已有聊天模型学习、审核与可选改写继续保留。
 分词缓存默认启用，内容未变时召回强化不会重新分词，词频仍在当前过滤范围内计算。
@@ -308,10 +311,12 @@ GUI 从记忆银行的“管理 → 备份恢复”进入，导出和导入流�
 - `recallReviewEnabled` 默认 true：先取最多 `recallCandidateBudget`（默认 12）条直接候选，
   连同联想结果交给当前路由的模型审核，再按条数、字符与 Token 估算预算呈现。
   没有必要使用历史资料时允许零条注入。审核使用与查询相关的原句摘要，
-  最多等待 `recallReviewTimeoutMs`（默认 3000 毫秒）；服务缺失、未知 ID、解析失败、
+  最多等待 `recallReviewTimeoutMs`（默认 15000 毫秒，已有显式配置优先）；服务缺失、未知 ID、解析失败、
   非正常结束或超时均跳过本轮注入。关闭该开关可恢复仅词面筛选。
   模型等待在写队列之外完成，审核返回后重新检查范围、生命周期和内容版本，
   防止同时发生的纠正或失效操作被旧审核结果覆盖。
+- `recallReviewCacheSeconds` 默认 0，范围 0 至 300 秒；可按同会话、问题、模型与候选版本缓存已完成审核。
+  最多保留 128 项，重载清空；失败不缓存，命中仍经过呈现前复核，详见[审核等待与缓存](../decisions/memory-review-latency.md)。
 - `injectMaxEstimatedTokens` 默认 900，与 `injectMaxTotalChars` 同时约束完整注入块；标题、来源与关联说明也占预算。
   超过任一预算的条目不注入也不强化，原文按需读取。
 - `injectRepeatAfterTurns` 默认 3，按会话、范围与内容版本去重，0 关闭。

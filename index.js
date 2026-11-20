@@ -37,6 +37,7 @@ import { createSleepAudit, sleepAuditDomainSpec } from './memory-sleep-audit.js'
 import { backupStateDomainSpec, createMemoryBackup } from './memory-backup.js'
 import { awakenedRecord, isDormant } from './memory-access.js'
 import { matchPreferenceContext, planResponsePreferences } from './memory-preferences.js'
+import { planReconsolidation } from './memory-reconsolidation.js'
 import { matchRecallTriggers, RECALL_TRIGGERS_SCHEMA } from './memory-triggers.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
@@ -148,6 +149,7 @@ function resolveConfig(raw) {
   numberField('deepDecayHalfLifeDays', 'integer', 0, 3650, 0)
   numberField('archiveDecayHalfLifeDays', 'integer', 0, 3650, 0)
   booleanField('dormancyEnabled', false)
+  booleanField('reconsolidationEnabled', false)
   numberField('dormantAfterDays', 'integer', 1, 3650, 90)
   numberField('dormantStrengthLine', 'number', 0, 1, 0.15)
   numberField('consolidateStrengthLine', 'number', 0.05, 0.95, 0.55)
@@ -223,7 +225,8 @@ function resolveConfig(raw) {
   booleanField('recallReviewEnabled', true)
   booleanField('recallDiagnosticsEnabled', true)
   booleanField('preferenceRecallEnabled', false)
-  numberField('recallReviewTimeoutMs', 'integer', 500, 30_000, 3_000)
+  numberField('recallReviewTimeoutMs', 'integer', 500, 30_000, 15_000)
+  numberField('recallReviewCacheSeconds', 'integer', 0, 300, 0)
   numberField('recallCandidateBudget', 'integer', 1, 30, 12)
 
   // ---- 记忆管理（M6）--------------------------------------------------------
@@ -235,6 +238,7 @@ function resolveConfig(raw) {
     problems.push(`unknown config keys: ${unknownKeys.join(', ')}`)
   }
   if (resolved.dormancyEnabled && !resolved.sleepAuditEnabled) problems.push('休眠功能要求同时开启 sleepAuditEnabled')
+  if (resolved.reconsolidationEnabled && !resolved.sleepAuditEnabled) problems.push('深层再巩固要求同时开启 sleepAuditEnabled')
   if (problems.length > 0) {
     throw new TypeError(`sleep-memory config rejected: ${problems.join('; ')}`)
   }
@@ -302,6 +306,12 @@ function parseStoredRecord(raw) {
       || typeof e.weight !== 'number' || !Number.isFinite(e.weight)) {
       fail('each edge must be { target: string, relation: string, weight: number }')
     }
+  }
+  const revisions = rec.edges.filter((edge) => edge.relation === 'revises')
+  if (revisions.length > 1 || revisions.some((edge) => rec.layer !== 'deep' || rec.replaces
+    || edge.target === rec.id || edge.weight !== 1
+    || typeof edge.reason !== 'string' || !edge.reason.trim() || edge.reason.length > 300)) {
+    fail('概要版本关系仅允许一个带原因的 deep 前序版本')
   }
   if (rec.supersededBy !== null && typeof rec.supersededBy !== 'string') fail('supersededBy must be null or a string')
   if (rec.gist !== null && typeof rec.gist !== 'string') fail('gist must be null or a string')
@@ -735,15 +745,16 @@ function makeGist(content) {
 
 /**
  * 深层概要（NREM 巩固产物）：逐条列出簇内记忆的首句要点。
- * @param {MemoryRecord[]} members 按 createdAt 升序
+ * @param {MemoryRecord[]} members 按展示优先级排列
  * @param {MemoryConfig} cfg
+ * @param {string} sourceLabel 来源类型说明
  * @returns {string}
  */
-function makeDeepSummary(members, cfg) {
+function makeDeepSummary(members, cfg, sourceLabel = '相关表层记忆') {
   const listed = members.slice(0, 8)
   const lines = listed.map((member) => `- ${firstSentence(member.content, 120)}`)
   if (members.length > listed.length) lines.push(`- ……等共 ${members.length} 条相关记忆`)
-  const summary = `【沉淀】来自 ${members.length} 条相关表层记忆的要点：\n${lines.join('\n')}`
+  const summary = `【沉淀】来自 ${members.length} 条${sourceLabel}的要点：\n${lines.join('\n')}`
   return summary.length > cfg.deepSummaryMaxChars ? `${summary.slice(0, cfg.deepSummaryMaxChars)}……` : summary
 }
 
@@ -814,7 +825,7 @@ async function deleteMemoryRecords(table, ids) {
 }
 
 /** 一次睡眠整理的结构化报告；dryRun 时数值为「将要发生」的计划。 */
-/** @typedef {{sleptAt: number, dryRun: boolean, durationMs: number, recordsBefore: number, recordsAfter: number, decayedCount: number, consolidated: {deepId: string, members: string[], summaryPreview: string}[], consolidatedCount: number, archived: {id: string, gistPreview: string}[], archivedCount: number, deleted: {id: string, contentPreview: string, idleDays: number}[], deletedCount: number, edgesAdded: number, capacityLimited: boolean, dormantCount?: number, dormantIds?: string[]}} SleepReport */
+/** @typedef {{sleptAt: number, dryRun: boolean, durationMs: number, recordsBefore: number, recordsAfter: number, decayedCount: number, consolidated: {deepId: string, members: string[], summaryPreview: string}[], consolidatedCount: number, archived: {id: string, gistPreview: string}[], archivedCount: number, deleted: {id: string, contentPreview: string, idleDays: number}[], deletedCount: number, edgesAdded: number, capacityLimited: boolean, dormantCount?: number, dormantIds?: string[], reconsolidatedCount?: number, reconsolidated?: {deepId: string, previousId: string, members: string[], summaryPreview: string, reason: string, matches: {id: string, sourceId: string, similarity: number}[]}[], reconsolidationSkippedCount?: number, reconsolidationSkipped?: {id: string, reasons: string[]}[], reconsolidationComparisons?: number}} SleepReport */
 
 /**
  * 运行一次完整睡眠周期。四个阶段依次是：
@@ -883,8 +894,15 @@ async function runSleepCycle(table, cfg, options = {}) {
   // ---- 2. NREM 巩固 ----
   const nremCandidates = live.filter(([id, rec]) =>
     rec.layer === 'surface' && strengthOf(id, rec) < cfg.consolidateStrengthLine)
+  const vectors = new Map()
+  const revisions = cfg.reconsolidationEnabled ? planReconsolidation(view, nremCandidates, cfg, (left, right) => {
+    for (const record of [left, right]) {
+      if (!vectors.has(record.id)) vectors.set(record.id, tokenVector(record.content))
+    }
+    return cosineSimilarity(vectors.get(left.id), vectors.get(right.id))
+  }) : { plans: [], claimed: new Set(), skipped: [], comparisons: 0 }
   const clusters = clusterBySimilarity(
-    nremCandidates.map(([id, rec]) => ({ id, rec })),
+    nremCandidates.filter(([id]) => !revisions.claimed.has(id)).map(([id, rec]) => ({ id, rec })),
     cfg.consolidateMinSimilarity,
   )
 
@@ -892,20 +910,22 @@ async function runSleepCycle(table, cfg, options = {}) {
   const finalOverwrite = new Map(reviewRoots)
   /** @type {SleepReport['consolidated']} */
   const consolidated = []
+  const reconsolidated = []
   /** @type {string[]} */
   const newDeepIds = []
   /** @type {SleepReport['archived']} */
   const archivedList = []
   const supersededIds = new Set()
 
-  for (const cluster of clusters) {
+  for (const group of [...revisions.plans, ...clusters.map((cluster) => ({ members: cluster.map((entry) => entry.rec) }))]) {
+    const members = group.members
+    const cluster = members.map((rec) => ({ id: rec.id, rec }))
     if (cluster.length < 2) continue
     if (availableSlots <= 0) {
       capacityLimited = true
       continue
     }
-    const members = cluster.map((entry) => entry.rec)
-    const recallTriggers = [...new Map(members.flatMap((member) => member.recallTriggers ?? [])
+    const recallTriggers = group.recallTriggers ?? [...new Map(members.flatMap((member) => member.recallTriggers ?? [])
       .map((trigger) => [JSON.stringify(trigger), trigger])).values()]
     // 触发入口不能随概要截断丢失。
     if (recallTriggers.length > 4) continue
@@ -917,7 +937,7 @@ async function runSleepCycle(table, cfg, options = {}) {
     const deepRecord = {
       id: deepId,
       kind: hasExperience ? 'experience' : 'fact',
-      content: makeDeepSummary(members, cfg),
+      content: makeDeepSummary(members, cfg, group.previous ? '原始来源' : undefined),
       layer: 'deep',
       tags: mergeTopTerms(members, 'tags', cfg.maxTags),
       keywords: mergeTopTerms(members, 'keywords', cfg.maxKeywords),
@@ -935,18 +955,30 @@ async function runSleepCycle(table, cfg, options = {}) {
       eventEndAt: Math.max(...members.map((member) => getEventRange(member)[1])),
       updatedAt: now,
       rewriteCount: 0,
-      edges: cluster.map((entry) => ({ target: entry.id, relation: 'consolidates', weight: 1 })),
+      edges: [
+        ...cluster.map((entry) => ({ target: entry.id, relation: 'consolidates', weight: 1 })),
+        ...(group.previous ? [{ target: group.previous.id, relation: 'revises', weight: 1, reason: group.reason }] : []),
+      ],
       supersededBy: null,
       gist: null,
       ...(recallTriggers.length ? { recallTriggers } : {}),
     }
     newDeepIds.push(deepId)
     finalOverwrite.set(deepId, deepRecord)
-    consolidated.push({
+    const outcome = {
       deepId,
       members: cluster.map((entry) => entry.id),
       summaryPreview: deepRecord.content.slice(0, REPORT_PREVIEW_CHARS),
-    })
+    }
+    if (group.previous) {
+      reconsolidated.push({ ...outcome, previousId: group.previous.id, reason: group.reason, matches: group.matches })
+      supersededIds.add(group.previous.id)
+      finalOverwrite.set(group.previous.id, {
+        ...group.previous, supersededBy: deepId, updatedAt: now,
+        strength: strengthOf(group.previous.id, group.previous),
+      })
+    }
+    if (!group.previous) consolidated.push(outcome)
     for (const entry of cluster) {
       supersededIds.add(entry.id)
       finalOverwrite.set(entry.id, {
@@ -982,6 +1014,11 @@ async function runSleepCycle(table, cfg, options = {}) {
     archived: archivedList.slice(0, REPORT_ITEM_LIMIT), archivedCount: archivedList.length,
     deleted: deletedList.slice(0, REPORT_ITEM_LIMIT), deletedCount: deletedList.length,
     edgesAdded: 0, capacityLimited, reviewCount: reviewRoots.size,
+    ...(cfg.reconsolidationEnabled ? {
+      reconsolidated: reconsolidated.slice(0, REPORT_ITEM_LIMIT), reconsolidatedCount: reconsolidated.length,
+      reconsolidationSkipped: revisions.skipped.slice(0, REPORT_ITEM_LIMIT),
+      reconsolidationSkippedCount: revisions.skipped.length, reconsolidationComparisons: revisions.comparisons,
+    } : {}),
     ...(options.audit ? { forgettingPaused: true } : {}),
   }
   /** @type {Map<string, {to: string, weight: number}[]>} */
@@ -1044,7 +1081,7 @@ async function runSleepCycle(table, cfg, options = {}) {
   if (cfg.dormancyEnabled) {
     for (const [id, rec] of live) {
       const current = finalOverwrite.get(id) ?? rec
-      if (!['deep', 'archive'].includes(current.layer) || isDormant(current, cfg) || doomedIds.includes(id)
+      if (supersededIds.has(id) || !['deep', 'archive'].includes(current.layer) || isDormant(current, cfg) || doomedIds.includes(id)
         || (now - rec.lastAccessAt) / 86_400_000 < cfg.dormantAfterDays
         || strengthOf(id, rec) > cfg.dormantStrengthLine) continue
       finalOverwrite.set(id, {
@@ -1392,6 +1429,7 @@ const GUI_CONFIG_FIELDS = [
   { key: 'contextualRecallEnabled', type: 'boolean' },
   { key: 'sleepAuditMaxBytes', type: 'integer', min: 0, max: 2147483647 },
   { key: 'dormancyEnabled', type: 'boolean' },
+  { key: 'reconsolidationEnabled', type: 'boolean' },
   { key: 'deepDecayHalfLifeDays', type: 'integer', min: 0, max: 3650 },
   { key: 'archiveDecayHalfLifeDays', type: 'integer', min: 0, max: 3650 },
   { key: 'dormantAfterDays', type: 'integer', min: 1, max: 3650 },
@@ -1404,6 +1442,8 @@ const GUI_CONFIG_FIELDS = [
   { key: 'salientReviewAfterDays', type: 'integer', min: 0, max: 3650 },
   { key: 'autoLearnEnabled', type: 'boolean' },
   { key: 'recallReviewEnabled', type: 'boolean' },
+  { key: 'recallReviewTimeoutMs', type: 'integer', min: 500, max: 30000 },
+  { key: 'recallReviewCacheSeconds', type: 'integer', min: 0, max: 300 },
   { key: 'recallDiagnosticsEnabled', type: 'boolean' },
   { key: 'preferenceRecallEnabled', type: 'boolean' },
   { key: 'semanticRecallEnabled', type: 'boolean' },
@@ -1614,7 +1654,7 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
+    if (!input || !['get', 'traceSources', 'correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1762,7 +1802,9 @@ export function apply(ctx, config) {
       feedbackEnabled: cfg.feedbackEnabled, feedbackRankingEnabled: cfg.feedbackRankingEnabled,
       sleepAuditEnabled: cfg.sleepAuditEnabled, contextualRecallEnabled: cfg.contextualRecallEnabled,
       dormancyEnabled: cfg.dormancyEnabled,
+      reconsolidationEnabled: cfg.reconsolidationEnabled,
       recallDiagnosticsEnabled: cfg.recallDiagnosticsEnabled, preferenceRecallEnabled: cfg.preferenceRecallEnabled,
+      recallReviewTimeoutMs: cfg.recallReviewTimeoutMs, recallReviewCacheSeconds: cfg.recallReviewCacheSeconds,
     })
   }
   // 同一插件实例内串行读改写，防止睡眠快照覆盖已提交的召回强化或事实纠正。
@@ -1779,11 +1821,11 @@ export function apply(ctx, config) {
     execute: definition.name === 'memory_sleep' ? definition.execute
       : (args, execution) => withMutation(async () => {
         const scoped = ['memory_write', 'memory_recall'].includes(definition.name)
-          || (definition.name === 'memory_manage' && ['get', 'correct', 'setState'].includes(args?.action))
+          || (definition.name === 'memory_manage' && ['get', 'traceSources', 'correct', 'setState'].includes(args?.action))
         if (scoped && args && typeof args === 'object' && !Array.isArray(args)) {
           const scope = await resolveScope(args, getSessionId(execution))
           const result = await definition.execute({ ...args, projectId: scope.projectId }, execution)
-          if (definition.name === 'memory_manage' && args.action === 'get' && !result.code) {
+          if (definition.name === 'memory_manage' && ['get', 'traceSources'].includes(args.action) && !result.code) {
             metrics.state.evidence.reads += 1
             metrics.state.evidence.estimatedTokens += estimateTokens(JSON.stringify(result, null, 2))
           }
@@ -2155,6 +2197,9 @@ export function apply(ctx, config) {
       recordsAfter: typeof rec.recordsAfter === 'number' ? rec.recordsAfter : null,
       decayedCount: num(rec.decayedCount),
       consolidatedCount: num(rec.consolidatedCount),
+      ...(typeof rec.reconsolidatedCount === 'number' ? {
+        reconsolidatedCount: rec.reconsolidatedCount, reconsolidationSkippedCount: num(rec.reconsolidationSkippedCount),
+      } : {}),
       archivedCount: num(rec.archivedCount),
       deletedCount: num(rec.deletedCount),
       edgesAdded: num(rec.edgesAdded),
@@ -2171,13 +2216,14 @@ export function apply(ctx, config) {
   function sleepCardResult(_args, result) {
     const meta = result !== null && typeof result === 'object' ? result.meta : undefined
     if (!isCardMeta(meta, 'memory_sleep')) return { card: 'generic' }
-    const m = /** @type {{ok?: unknown, code?: string, message?: string, dryRun?: boolean, recordsBefore?: number|null, recordsAfter?: number|null, decayedCount?: number, consolidatedCount?: number, archivedCount?: number, deletedCount?: number, edgesAdded?: number, capacityLimited?: boolean}} */ (meta)
+    const m = /** @type {{ok?: unknown, code?: string, message?: string, dryRun?: boolean, recordsBefore?: number|null, recordsAfter?: number|null, decayedCount?: number, consolidatedCount?: number, reconsolidatedCount?: number, reconsolidationSkippedCount?: number, archivedCount?: number, deletedCount?: number, edgesAdded?: number, capacityLimited?: boolean}} */ (meta)
     if (m.ok !== true) {
       return { card: 'generic', title: '睡眠整理失败', content: cardContent(`❌ ${m.message}（${m.code}）`) }
     }
     const lines = [
       `记录 ${m.recordsBefore ?? '?'} → ${m.recordsAfter ?? '?'}`,
       `NREM 巩固 ${m.consolidatedCount} · 归档 ${m.archivedCount} · 衰减 ${m.decayedCount} · 遗忘 ${m.deletedCount} · REM 联想边 +${m.edgesAdded}`,
+      ...(m.reconsolidatedCount !== undefined ? [`深层再巩固 ${m.reconsolidatedCount} · 跳过 ${m.reconsolidationSkippedCount}`] : []),
       `容量上限${m.capacityLimited ? '已触发' : '未触发'}${m.dryRun ? ' · 预演未写入任何数据' : ''}`,
     ]
     return { card: 'generic', title: `睡眠整理${m.dryRun ? ' · 预演' : ''}完成`, content: cardContent(lines.join('\n')) }
@@ -2185,6 +2231,7 @@ export function apply(ctx, config) {
 
   const MANAGE_ACTION_LABELS = {
     list: '列表', forget: '遗忘', stats: '概况', get: '原文追溯', correct: '事实纠正',
+    traceSources: '多层来源追溯',
     export: '备份导出', import: '备份导入', status: '运行状态',
     setState: '有效性管理', scope: '会话范围', bind: '项目绑定',
     sleepHistory: '睡眠历史', sleepRollback: '睡眠回滚', sleepRecover: '中断恢复',
@@ -2201,6 +2248,7 @@ export function apply(ctx, config) {
     if (isExtendedAction(value?.action)) {
       const summaries = {
         get: `记忆 ${value.record?.id ?? ''}，来源 ${value.totalSources ?? 0} 条，${value.current ? '当前有效' : '历史记录'}`,
+        traceSources: `已追溯 ${value.items?.length ?? 0} 条来源，${value.complete ? '本次遍历完整' : '存在未展开或异常引用'}，估算 ${value.estimatedTokens ?? 0} Token`,
         correct: `已新增事实 ${value.id ?? ''}，替代 ${value.replaces ?? ''}，历史原文保留`,
         export: `已生成 ${value.backup?.records?.length ?? 0} 条记忆的完整备份`,
         import: `${value.dryRun ? '预演' : '导入'}：计划 ${value.planned ?? 0} 条，写入 ${value.imported ?? 0} 条，跳过相同记录 ${value.skipped ?? 0} 条`,
@@ -2615,6 +2663,11 @@ export function apply(ctx, config) {
       decayedCount: { type: 'integer' },
       consolidatedCount: { type: 'integer' },
       consolidated: { type: 'array' },
+      reconsolidatedCount: { type: 'integer' },
+      reconsolidated: { type: 'array' },
+      reconsolidationSkippedCount: { type: 'integer' },
+      reconsolidationSkipped: { type: 'array' },
+      reconsolidationComparisons: { type: 'integer' },
       archivedCount: { type: 'integer' },
       archived: { type: 'array' },
       dormantCount: { type: 'integer' },
@@ -2784,6 +2837,7 @@ export function apply(ctx, config) {
       'forget=按 id 彻底删除一条记忆，默认级联删除被它合并（superseded）的记录，并清理指向被删记录的联想边；删除不可恢复；',
       'stats=记忆库概况：总记录数与容量上限、各层计数、被合并的数量、联想边总数、最早/最新记录。',
       'get=按 id 读取原文及分页来源，不强化；项目记录需传 projectId。',
+      'traceSources=沿巩固关系逐层读取来源路径与预览；同范围去重且受深度、条数和 Token 估算预算限制，不强化或唤醒。',
       'correct=用 content 纠正同项目的有效事实，新增替代记录，保留旧原文。',
       'export=导出含历史来源的完整 JSON 备份；import=校验备份并导入，默认 dryRun:true，同 ID 异内容拒绝。',
       'status=持久睡眠调度与本次加载的评分、查询扩展、注入计数；此工具是个人 profile 管理接口。',
@@ -2796,12 +2850,15 @@ export function apply(ctx, config) {
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'], description: '记忆管理操作' },
+        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'traceSources', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'], description: '记忆管理操作' },
         layer: { type: 'string', enum: LAYERS, description: 'list 专用：限定记忆层（surface/deep/archive/salient）' },
         tag: { type: 'string', description: 'list 专用：限定标签，只列含该标签的记忆' },
         offset: { type: 'integer', description: 'list/get/sleepHistory 分页偏移量，默认 0' },
         limit: { type: 'integer', description: '本页返回条数；sleepHistory 为 1~100 且默认 20，list 最多 500' },
-        id: { type: 'string', description: 'forget 专用：要删除的记忆 id（可先用 list 查到）' },
+        id: { type: 'string', description: 'get/traceSources/correct/setState/forget 的目标记忆 ID' },
+        maxDepth: { type: 'integer', description: 'traceSources 展开深度，1 至 8，默认 3' },
+        maxNodes: { type: 'integer', description: 'traceSources 返回来源条数，1 至 100，默认 30' },
+        maxEstimatedTokens: { type: 'integer', description: 'traceSources 完整 JSON 的 Token 估算预算，300 至 16000，默认 2000' },
         cascade: { type: 'boolean', description: 'forget 专用：是否级联删除被本条 superseded 的记录，默认 true' },
         ...MEMORY_INPUT_FIELDS,
         content: { type: 'string', description: 'correct 专用：完整的新事实' },
@@ -2819,7 +2876,7 @@ export function apply(ctx, config) {
     },
     output: {
       schema: { oneOf: [MANAGE_LIST_OK_SCHEMA, MANAGE_FORGET_OK_SCHEMA, MANAGE_STATS_OK_SCHEMA,
-        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'] } }, required: ['action'] },
+        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'traceSources', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'] } }, required: ['action'] },
         ERROR_SCHEMA] },
       render(_args, value) {
         return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
@@ -3176,9 +3233,11 @@ export function apply(ctx, config) {
         // 审核的网络等待不能占用写队列；返回后重新核对事实版本和范围。
         trace.data.candidateCount = candidates.length
         trace.diagnostics.stage = 'review'
-        const reviewed = await intelligence.review(payload.modelSelection, queryText, scope, candidates, payload.signal)
+        const reviewed = await intelligence.review(payload.modelSelection, queryText, scope, candidates, payload.signal, versions)
         const approved = reviewed.accepted
         trace.diagnostics.review = reviewed.status
+        trace.diagnostics.reviewDurationMs = reviewed.durationMs
+        trace.diagnostics.reviewCache = reviewed.cache
         trace.data.approvedCount = approved.size
         if (reviewed.status === 'completed') trace.skip('review-rejected', candidates.length - approved.size)
         if (['timeout', 'cancelled', 'failed'].includes(reviewed.status)) trace.skip(`review-${reviewed.status}`)
@@ -3271,7 +3330,7 @@ export function apply(ctx, config) {
   }).catch((error) => { console.error('[sleep-memory] 睡眠调度初始化失败', error) })
 }
 
-/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, recallReviewTimeoutMs: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
+/** @typedef {{recallBudget: number, maxContentChars: number, maxTags: number, maxKeywords: number, salienceRecallBoost: number, strengthRecallGain: number, salienceValenceThreshold: number, salienceArousalThreshold: number, maxRecords: number, sleepIntervalMinutes: number, decayHalfLifeDays: number, deepDecayHalfLifeDays: number, archiveDecayHalfLifeDays: number, dormancyEnabled: boolean, reconsolidationEnabled: boolean, dormantAfterDays: number, dormantStrengthLine: number, consolidateStrengthLine: number, consolidateMinSimilarity: number, archiveStrengthFloor: number, deleteArchiveAfterDays: number, dreamEdgesPerRecord: number, dreamMaxCandidates: number, deepSummaryMaxChars: number, spreadDepth: number, spreadDecay: number, spreadMaxNeighbors: number, spreadMinActivation: number, injectEnabled: boolean, injectBudget: number, injectMinScore: number, injectMaxCharsPerHit: number, salientScoringEnabled: boolean, salientScoringTimeoutMs: number, semanticRecallEnabled: boolean, semanticRecallWeight: number, semanticRecallTimeoutMs: number, semanticMaxTerms: number, autoLearnEnabled: boolean, autoLearnMaxItems: number, autoLearnTimeoutMs: number, recallReviewEnabled: boolean, recallDiagnosticsEnabled: boolean, preferenceRecallEnabled: boolean, recallReviewTimeoutMs: number, recallReviewCacheSeconds: number, recallCandidateBudget: number, manageListMaxItems: number, manageListPreviewChars: number, projectId: string, sleepOnStart: boolean, injectMaxTotalChars: number, injectMaxEstimatedTokens: number, injectRepeatAfterTurns: number, salientDecayHalfLifeDays: number, salientReviewAfterDays: number, recallPlanMode: 'off'|'shadow'|'local', recallMinCoverage: number, recallAliases: {projectId: string|null, phrase: string, target: string}[], learningPolicyMode: 'current'|'evidence', feedbackEnabled: boolean, feedbackRankingEnabled: boolean}} MemoryConfig */
 /** @typedef {ReturnType<MemoryDomain['table']>} MemoryTable */
-/** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, access?: {state: 'awake'|'dormant', at: number, reason: string, lastWake?: {at: number, via: 'context'|'association', fromId?: string, hops?: number}}, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
+/** @typedef {{id: string, kind: 'fact'|'experience', content: string, layer: string, tags: string[], keywords: string[], importance: number, strength: number, valence: number|null, arousal: number|null, accessCount: number, lastAccessAt: number, createdAt: number, updatedAt: number, rewriteCount: number, edges: {target: string, relation: string, weight: number, reason?: string}[], supersededBy: string|null, gist: string|null, lastDecayAt?: number, access?: {state: 'awake'|'dormant', at: number, reason: string, lastWake?: {at: number, via: 'context'|'association', fromId?: string, hops?: number}}, projectId?: string|null, source?: {kind: string, sessionId?: string, messageId?: string, confirmed?: boolean}, occurredAt?: number, eventEndAt?: number, replaces?: string, lifecycle?: {state: 'active'|'review'|'invalid', reason: string, at: number, revision: number}}} MemoryRecord */
 /** @typedef {{name: string, table(name: 'records'): {get(id: string): MemoryRecord|undefined, keys(): IterableIterator<string>, entries(): IterableIterator<[string, MemoryRecord]>, readonly size: number, put(id: string, value: MemoryRecord): Promise<void>, delete(id: string): Promise<boolean>, deleteMany?: (ids: string[]) => Promise<number>, update(id: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>}, close(): Promise<void>}} MemoryDomain */
