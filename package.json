@@ -43,6 +43,7 @@
     "memory-reconsolidation.js",
     "memory-recall-evidence.js",
     "memory-outcomes.js",
+    "memory-recollection.js",
     "memory-triggers.js",
     "memory-retrieval.js",
     "memory-search-index.js",

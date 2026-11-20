@@ -1680,7 +1680,7 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['get', 'traceSources', 'correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
+    if (!input || !['get', 'recollect', 'traceSources', 'correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1851,11 +1851,11 @@ export function apply(ctx, config) {
     execute: definition.name === 'memory_sleep' ? definition.execute
       : (args, execution) => withMutation(async () => {
         const scoped = ['memory_write', 'memory_recall'].includes(definition.name)
-          || (definition.name === 'memory_manage' && ['get', 'traceSources', 'expandRecall', 'correct', 'setState'].includes(args?.action))
+          || (definition.name === 'memory_manage' && ['get', 'recollect', 'traceSources', 'expandRecall', 'correct', 'setState'].includes(args?.action))
         if (scoped && args && typeof args === 'object' && !Array.isArray(args)) {
           const scope = await resolveScope(args, getSessionId(execution))
           const result = await definition.execute({ ...args, projectId: scope.projectId }, execution)
-          if (definition.name === 'memory_manage' && ['get', 'traceSources', 'expandRecall'].includes(args.action) && !result.code) {
+          if (definition.name === 'memory_manage' && ['get', 'recollect', 'traceSources', 'expandRecall'].includes(args.action) && !result.code) {
             metrics.state.evidence.reads += 1
             metrics.state.evidence.estimatedTokens += estimateTokens(JSON.stringify(result, null, 2))
           }
@@ -2275,6 +2275,7 @@ export function apply(ctx, config) {
   const MANAGE_ACTION_LABELS = {
     list: '列表', forget: '遗忘', stats: '概况', get: '原文追溯', correct: '事实纠正',
     traceSources: '多层来源追溯',
+    recollect: '回忆视图',
     expandRecall: '逐层取证',
     export: '备份导出', import: '备份导入', status: '运行状态',
     setState: '有效性管理', scope: '会话范围', bind: '项目绑定',
@@ -2292,6 +2293,7 @@ export function apply(ctx, config) {
     if (isExtendedAction(value?.action)) {
       const summaries = {
         get: `记忆 ${value.record?.id ?? ''}，来源 ${value.totalSources ?? 0} 条，${value.current ? '当前有效' : '历史记录'}`,
+        recollect: `回忆 ${value.id ?? ''}，保留 ${value.includedChars ?? 0} 字符，省略 ${value.omittedChars ?? 0} 字符`,
         traceSources: `已追溯 ${value.items?.length ?? 0} 条来源，${value.complete ? '本次遍历完整' : '存在未展开或异常引用'}，估算 ${value.estimatedTokens ?? 0} Token`,
         expandRecall: `已展开 ${value.items?.length ?? 0} 条来源，剩余估算 ${value.remaining?.estimatedTokens ?? 0} Token`,
         correct: `已新增事实 ${value.id ?? ''}，替代 ${value.replaces ?? ''}，历史原文保留`,
@@ -2894,6 +2896,8 @@ export function apply(ctx, config) {
       'forget=按 id 彻底删除一条记忆，默认级联删除被它合并（superseded）的记录，并清理指向被删记录的联想边；删除不可恢复；',
       'stats=记忆库概况：总记录数与容量上限、各层计数、被合并的数量、联想边总数、最早/最新记录。',
       'get=按 id 读取原文及分页来源，不强化；项目记录需传 projectId。',
+      'recollect=按 id 读取独立的原句回忆视图；brief 按年龄收缩经历细节，expanded 展开，original 返回完整底稿；事实、偏好和显著记忆保持完整。',
+      'recollect 返回省略范围及原文版本；继续展开可携带 expectedVersion，版本变化会拒绝；年龄不代表可信度，省略处不得推测。',
       'traceSources=沿巩固关系逐层读取来源路径与预览；同范围去重且受深度、条数和 Token 估算预算限制，不强化或唤醒。',
       'expandRecall=概要不足时按需展开本轮已呈现的来源，每次一层；必须携带召回返回的 recallId 和已发现的 id，不强化或唤醒。',
       'expandRecall 的 hasMore 表示同 id 还有下一页，items[].expandable 表示可继续展开该来源；够用即停，预算耗尽或内容截断不能推测缺失事实。',
@@ -2909,12 +2913,15 @@ export function apply(ctx, config) {
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'], description: '记忆管理操作' },
+        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'recollect', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'], description: '记忆管理操作' },
         layer: { type: 'string', enum: LAYERS, description: 'list 专用：限定记忆层（surface/deep/archive/salient）' },
         tag: { type: 'string', description: 'list 专用：限定标签，只列含该标签的记忆' },
         offset: { type: 'integer', description: 'list/get/sleepHistory 分页偏移量，默认 0' },
         limit: { type: 'integer', description: '本页返回条数；sleepHistory 为 1~100 且默认 20，list 最多 500' },
-        id: { type: 'string', description: 'get/traceSources/expandRecall/correct/setState/forget 的目标记忆 ID' },
+        id: { type: 'string', description: 'get/recollect/traceSources/expandRecall/correct/setState/forget 的目标记忆 ID' },
+        detail: { type: 'string', enum: ['brief', 'expanded', 'original'], description: 'recollect 专用：回忆细节层级，默认 brief' },
+        query: { type: 'string', description: 'recollect 专用：最多 500 字符，优先展示与问题相关的原句段' },
+        expectedVersion: { type: 'string', description: 'recollect 专用：get.recollectionVersion 或 recollect.sourceVersion，用于绑定同一底稿' },
         recallId: { type: 'string', description: 'expandRecall 专用：本轮概要召回提供的取证标识' },
         maxDepth: { type: 'integer', description: 'traceSources 展开深度，1 至 8，默认 3' },
         maxNodes: { type: 'integer', description: 'traceSources 返回来源条数，1 至 100，默认 30' },
@@ -2937,7 +2944,7 @@ export function apply(ctx, config) {
     },
     output: {
       schema: { oneOf: [MANAGE_LIST_OK_SCHEMA, MANAGE_FORGET_OK_SCHEMA, MANAGE_STATS_OK_SCHEMA,
-        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'] } }, required: ['action'] },
+        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'recollect', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'] } }, required: ['action'] },
         ERROR_SCHEMA] },
       render(_args, value) {
         return [{ type: 'text', text: JSON.stringify(value, null, 2) }]

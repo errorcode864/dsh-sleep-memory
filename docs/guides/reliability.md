@@ -72,6 +72,7 @@ source_of_truth: code-and-script
 深层概要可额外开启 `reconsolidationEnabled` 与 `sleepAuditEnabled`，在新证据或来源纠正后生成新版本。
 在原文弹窗中读取前后版本和各版证据，通过睡眠审计预演回滚，具体限制见[深层再巩固](../decisions/memory-reconsolidation.md)。
 开启 `progressiveRecallEnabled` 后，概要召回提供 `expandRecall` 入口供模型逐层取证，预算和窗口规则见[递进取证](../decisions/memory-progressive-recall.md)。
+原文弹窗与 `memory_manage recollect` 可生成只读回忆视图，按年龄收缩经历细节并标明省略范围；使用原文版本校验保持对照一致，见[回忆视图](../decisions/memory-recollection.md)。
 
 本地检索不调用嵌入模型且不增加模型依赖，已有聊天模型学习、审核与可选改写继续保留。
 分词缓存默认启用，内容未变时召回强化不会重新分词，词频仍在当前过滤范围内计算。

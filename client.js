@@ -826,6 +826,7 @@ window.__ModuleLoader__.load({
                     detail.record.access?.lastWake ? h('div', null, h('dt', null, '最近唤醒'), h('dd', null,
                       `${formatRuntimeTime(detail.record.access.lastWake.at)} · ${detail.record.access.lastWake.via === 'context' ? '情境条件' : `关联 ${detail.record.access.lastWake.fromId} · ${detail.record.access.lastWake.hops} 跳`}`)) : null),
                   detail.replacedBy ? h('p', { className: 'sm-runtime-note' }, `替代记忆：${detail.replacedBy}`) : null),
+                h(RecollectionPanel, { key: detail.recollectionVersion, detail, onRefresh: () => void loadDetail() }),
                 h('section', { className: 'sm-record-section', 'aria-label': '来源信息' },
                   h('h3', null, '来源信息'),
                   h('dl', { className: 'sm-runtime-info' },
@@ -857,6 +858,57 @@ window.__ModuleLoader__.load({
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
         const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+
+        /** 视图与底稿绑定同一版本，展开只读取而不强化记忆。 */
+        function RecollectionPanel({ detail, onRefresh }) {
+            const [recollection, setRecollection] = useState(null);
+            const [query, setQuery] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const read = async (level) => {
+                setBusy(true);
+                setError('');
+                setRecollection(null);
+                try {
+                    setRecollection(await call('manage', {
+                        action: 'recollect', id: detail.record.id, projectId: detail.record.projectId ?? null,
+                        detail: level, query, expectedVersion: detail.recollectionVersion,
+                    }));
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '回忆视图与原文对照' },
+                h('h3', null, '回忆视图与原文对照'),
+                h('p', { className: 'sm-runtime-note' }, '按年龄收缩经历的展示细节；事实、偏好和显著记忆保持完整，原文不会被改写。'),
+                h('label', null, '回忆线索', h('input', { type: 'text', value: query, maxLength: 500,
+                    disabled: busy, 'aria-label': '回忆线索', onChange: (event) => { setQuery(event.target.value); setRecollection(null); } })),
+                ...[['brief', '生成简略回忆'], ['expanded', '展开更多细节'], ['original', '显示完整底稿']].map(([level, label]) =>
+                    h('button', { key: level, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void read(level) }, label)),
+                busy ? h('p', { role: 'status' }, '正在读取回忆视图…') : null,
+                error ? h('div', { className: 'sm-runtime-error', role: 'alert' }, h('p', null, error),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-outline', onClick: onRefresh }, '刷新底稿后重试')) : null,
+                recollection ? h('div', null,
+                    h('p', null, `事件距今 ${recollection.ageDays} 天 · 保留 ${recollection.includedChars} 字符 · 省略 ${recollection.omittedChars} 字符`),
+                    !recollection.current ? h('p', { role: 'status' }, '此记录为历史版本或已不参与当前召回。') : null,
+                    h('p', { className: 'sm-record-original', 'aria-label': '回忆片段' }, recollection.content || '预算内没有可完整呈现的句段，请展开或读取完整底稿。'),
+                    h('p', { className: 'sm-runtime-note' }, recollection.note),
+                    h('p', null, `视图格式 v${recollection.formatVersion} · 底稿 ${recollection.sourceVersion.slice(0, 12)} · 视图 ${recollection.viewVersion.slice(0, 12)}`),
+                    h('details', null,
+                        h('summary', null, '对照原文与省略范围'),
+                        h('p', null, '标亮部分为已呈现片段，其余为省略内容；位置使用 UTF-16 下标且末端不包含。'),
+                        h('p', { className: 'sm-record-original', 'aria-label': '回忆原文对照' },
+                            ...[...recollection.fragments.map((fragment) => ({ ...fragment, included: true })),
+                                ...recollection.omitted.map((range) => ({ ...range, included: false }))]
+                                .sort((a, b) => a.start - b.start).map((range) =>
+                                    h(range.included ? 'mark' : 'span', { key: range.start,
+                                        title: `${range.included ? '呈现' : '省略'} [${range.start}, ${range.end})` },
+                                    detail.record.content.slice(range.start, range.end)))),
+                        recollection.omitted.length ? h('p', null, `省略范围：${recollection.omitted.map((range) => `[${range.start}, ${range.end})`).join('、')}`) : h('p', null, '没有省略内容。'))) : null);
+        }
 
         /** 多层追溯按需读取且原文展开沿用同一项目范围。 */
         function SourceTracePanel({ rootId, projectId, summaryVersion }) {

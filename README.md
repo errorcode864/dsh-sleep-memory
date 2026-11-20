@@ -146,6 +146,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 - **`memory_recall`**：BM25 检索 + salience 加成；沿 REM 联想边扩散激活带出关联记忆（附 `via` 标注，不计入强化）；支持 `since`/`until` 时间窗与 `timeField: "occurredAt"` 事件范围检索。
 - **先摘要再读证据**：默认 `fidelity: "summary"` 返回相关原句和记忆 ID，省略内容时标注 `truncated`；`memory_manage get` 按 ID 读取完整原文、学习证据与纠正链，`recall` 和 `raw` 保留原有呈现方式。
 - **多层来源追溯**：`memory_manage traceSources` 按巩固关系展开来源路径，限制深度、条数和 Token 估算；原文弹窗可逐层展开和单独读取完整证据，详见[来源追溯说明](docs/decisions/memory-source-tracing.md)。
+- **回忆与原文对照**：`memory_manage recollect` 提供按年龄收缩的经历片段、更多细节与完整底稿；事实、偏好和显著记忆保留全文，省略范围与版本均可核对，详见[回忆视图](docs/decisions/memory-recollection.md)。
 - **消耗可见**：运行详情分别统计学习、审核、查询扩展和情绪评分的模型实报 Token 与字符估算，自动注入同时受字符预算和 Token 估算预算限制。
 
 ### 睡眠整理（memory_sleep）

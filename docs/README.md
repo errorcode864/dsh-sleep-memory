@@ -36,6 +36,7 @@ source_of_truth: code-and-decision
   - [深层概要跨批次再巩固](decisions/memory-reconsolidation.md)（decision，active，更新于 2026-11-20）
   - [概要后的按需逐层取证](decisions/memory-progressive-recall.md)（decision，active，更新于 2026-11-20）
   - [实际结果驱动的激励与警示](decisions/memory-outcome-feedback.md)（decision，active，更新于 2026-11-20）
+  - [回忆细节收缩与原文对照](decisions/memory-recollection.md)（decision，active，更新于 2026-11-20）
 
 ### 指南与运维
 

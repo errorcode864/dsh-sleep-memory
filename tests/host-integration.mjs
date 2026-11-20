@@ -312,6 +312,8 @@ try {
             edges: [{ target: 'smm_origin', relation: 'consolidates', weight: 1 }] }),
         fixture('smm_root', { projectId: '证据项目', layer: 'deep',
             edges: [{ target: 'smm_summary', relation: 'consolidates', weight: 1 }] }),
+        fixture('smm_recollection_host', { projectId: '证据项目', kind: 'experience', occurredAt: 1,
+            content: '迁移前必须备份，未验证恢复时不得继续。\n'.repeat(80) }),
     ]
     await sourceHost.api.manage({ action: 'import', dryRun: false, backup: exportMemoryBackup(new Map(sources.map((record) => [record.id, record]))) })
 } finally { await sourceHost.close() }
@@ -322,8 +324,15 @@ try {
     assert.deepEqual(trace.items[1].path, ['smm_root', 'smm_summary', 'smm_origin'])
     assert.equal(trace.complete, true)
     assert.equal((await sourceReloaded.api.manage({ action: 'get', id: 'smm_origin', projectId: '证据项目' })).record.content, '最初的字符集检查证据')
+    const original = await sourceReloaded.api.getRecord({ id: 'smm_recollection_host' })
+    const recollection = { action: 'recollect', id: original.record.id, projectId: '证据项目', expectedVersion: original.recollectionVersion }
+    const brief = await sourceReloaded.api.manage(recollection)
+    assert.ok(brief.truncated && brief.omittedChars > 0)
+    assert.ok(brief.fragments.every((fragment) => fragment.text === original.record.content.slice(fragment.start, fragment.end)))
+    assert.equal((await sourceReloaded.api.manage({ ...recollection, detail: 'original' })).content, original.record.content)
     assert.deepEqual((await sourceReloaded.api.manage({ action: 'export' })).backup.records, before)
     console.log('多层来源真实存储验收通过：重载后路径、原文和只读状态一致。')
+    console.log('回忆视图真实存储验收通过：重载后版本绑定、原句对照和只读展开一致。')
 } finally { await sourceReloaded.close() }
 
 const cacheRoot = await mkdtemp(resolve(testRoot, 'host-review-cache-'))
