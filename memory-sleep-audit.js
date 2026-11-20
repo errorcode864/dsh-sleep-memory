@@ -43,7 +43,7 @@ export function sleepAuditDomainSpec(parseRecord) {
 }
 
 /** 修改与恢复共用串行入口以避免后台读取重复执行未完成批次。 */
-export function createSleepAudit(openRecords, openAudit) {
+export function createSleepAudit(openRecords, openAudit, maxBytes) {
     let operations = Promise.resolve()
     let needsRecovery = true
     const serialize = (operation) => {
@@ -91,6 +91,13 @@ export function createSleepAudit(openRecords, openAudit) {
                 id: `sleep_${randomUUID()}`, state: 'prepared', createdAt: Date.now(),
                 changes, report: structuredClone(report),
             }
+            const retainedBytes = [...audit.entries()].reduce((sum, [, value]) => sum + Buffer.byteLength(JSON.stringify(value)), 0)
+            const batchBytes = Buffer.byteLength(JSON.stringify(batch))
+            if (maxBytes > 0 && retainedBytes + batchBytes > maxBytes) {
+                const error = new Error('睡眠审计已达到容量上限，请导出备份并调整审计容量')
+                error.code = 'audit_capacity'
+                throw error
+            }
             // 计划先持久化以便断电后使用相同 ID 完成写入。
             needsRecovery = true
             await audit.put(batch.id, batch)
@@ -104,11 +111,24 @@ export function createSleepAudit(openRecords, openAudit) {
                 sleepHistory: ['action', 'batchId', 'offset', 'limit'],
                 sleepRecover: ['action'],
                 sleepRollback: ['action', 'batchId', 'dryRun', 'planToken'],
+                sleepStats: ['action'],
             }
             if (Object.keys(args).some((key) => !allowed[args.action].includes(key))) {
                 return { code: 'invalid_args', message: '睡眠审计参数包含未知字段' }
             }
             const audit = await openAudit()
+            if (args.action === 'sleepStats') {
+                const batches = [...audit.entries()].map(([, batch]) => batch)
+                const retainedBytes = batches.reduce((sum, batch) => sum + Buffer.byteLength(JSON.stringify(batch)), 0)
+                return {
+                    action: args.action, batchCount: batches.length, retainedBytes, maxBytes,
+                    measurement: 'json-utf8', overLimit: maxBytes > 0 && retainedBytes >= maxBytes,
+                    states: Object.fromEntries(STATES.map((state) => [state, batches.filter((batch) => batch.state === state).length])),
+                    changedRecords: batches.reduce((sum, batch) => sum + batch.changes.length, 0),
+                    oldestAt: batches.reduce((at, batch) => Math.min(at ?? batch.createdAt, batch.createdAt), null),
+                    newestAt: batches.reduce((at, batch) => Math.max(at ?? batch.createdAt, batch.createdAt), null),
+                }
+            }
             if (args.action === 'sleepRecover') {
                 return { action: args.action, recovered: await recoverPending() }
             }

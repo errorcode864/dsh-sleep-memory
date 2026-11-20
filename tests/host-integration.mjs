@@ -14,8 +14,8 @@ const testRoot = resolve(import.meta.dirname, '../tmp')
 await mkdir(testRoot, { recursive: true })
 const root = await mkdtemp(resolve(testRoot, 'host-integration-'))
 
-function startInstance(config = {}, failure = {}) {
-    const backend = new JsonStorageBackend(root)
+function startInstance(config = {}, failure = {}, storageRoot = root) {
+    const backend = new JsonStorageBackend(storageRoot)
     const facility = new DomainFacility({
         storage: { backend: { get: () => backend } },
         emit: () => {},
@@ -35,6 +35,7 @@ function startInstance(config = {}, failure = {}) {
                     if (spec.name === 'memory_bank' && failure.enabled && ++failure.writes === 2) {
                         throw new Error('真实存储验收模拟睡眠中断')
                     }
+                    if (spec.name === 'memory_sleep_audit' && failure.audit) throw new Error('真实审计备份导入中断')
                     await put(id, record)
                 }
                 // 宿主实例测试绝不进入物理遗忘，避免测试清理误触文件删除。
@@ -213,10 +214,30 @@ try {
     await recovered.close()
 }
 const restored = startInstance()
+let auditBackup
 try {
     assert.deepEqual((await restored.api.manage({ action: 'export' })).backup.records, beforeInterrupted)
     assert.equal((await restored.api.manage({ action: 'sleepHistory', batchId: interruptedId })).items[0].state, 'rolled-back')
     console.log('新增故障验收通过：真实磁盘中断、关闭开关后恢复、回滚落盘与再次重载。')
+    auditBackup = (await restored.api.manage({ action: 'export', includeAudit: true })).backup
 } finally {
     await restored.close()
 }
+
+const backupRoot = await mkdtemp(resolve(testRoot, 'host-backup-'))
+const backupFailure = { audit: true }
+const importing = startInstance({ autoLearnEnabled: false }, backupFailure, backupRoot)
+try {
+    const args = { action: 'import', backup: auditBackup }
+    const plan = await importing.api.manage(args)
+    await assert.rejects(importing.api.manage({ ...args, dryRun: false, planToken: plan.planToken }), /审计备份导入中断/)
+} finally { await importing.close() }
+const imported = startInstance({ autoLearnEnabled: false }, {}, backupRoot)
+try {
+    await imported.api.stats()
+    const exported = (await imported.api.manage({ action: 'export', includeAudit: true })).backup
+    assert.deepEqual(exported.records, auditBackup.records)
+    assert.deepEqual(exported.audits, auditBackup.audits)
+    assert.equal((await imported.api.manage({ action: 'sleepStats' })).batchCount, auditBackup.audits.length)
+    console.log('审计备份真实存储验收通过：新目录导入中断后重载续写，记忆和审计逐项一致。')
+} finally { await imported.close() }

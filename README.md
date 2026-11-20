@@ -207,11 +207,15 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 `sleepAuditEnabled` 开启后保存每次睡眠的完整修改批次，支持中断恢复和预演回滚。
 管理面板的“睡眠审计”可查看历史与修改详情，后续修改发生冲突时拒绝覆盖。
 审计模式暂停物理遗忘；回滚保留证据并停用新概要。
+`sleepStats` 可读取审计内容容量，`sleepAuditMaxBytes` 可限制新增批次。
+“备份恢复”提供额外的记忆与审计 v2 备份，支持预演和跨域中断恢复，默认 v1 格式保持兼容。
+详细范围见[审计容量与备份恢复](docs/decisions/memory-audit-backup.md)。
 
 `contextualRecallEnabled` 开启后按记忆的 `recallTriggers: [{when, cues}]` 补充召回候选，
 正文没有共同词语时也能通过明确情境短语找到经历。
 候选仍受项目、时间、有效性、精确实体约束与相关性审核限制。
 两个开关均默认关闭，完整接口与验证边界见[睡眠审计与情境触发](docs/decisions/memory-contextual-audit.md)。
+真实模型评测入口为 `npm run eval:model -- --check`，配置及试用步骤见[模型试用指南](docs/guides/model-trial.md)。
 
 ---
 

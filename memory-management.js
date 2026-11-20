@@ -3,7 +3,7 @@ import {
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
 
-const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback']
+const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)
@@ -16,7 +16,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
         correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt', 'recallTriggers'],
-        export: ['action'],
+        export: ['action', 'includeAudit'],
         import: ['action', 'backup', 'dryRun'],
         status: ['action'],
         setState: ['action', 'id', 'projectId', 'state', 'reason', 'dryRun', 'planToken'],
@@ -29,7 +29,10 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     if (problems.length) return invalid(problems.join('；'))
     if (args.action === 'scope' || args.action === 'bind') return manageScope(args)
     if (args.action === 'status') return { action: 'status', ...await status() }
-    if (args.action === 'export') return { action: 'export', backup: exportMemoryBackup(table) }
+    if (args.action === 'export') {
+        if (args.includeAudit !== undefined && typeof args.includeAudit !== 'boolean') return invalid('includeAudit 必须为布尔值')
+        return { action: 'export', backup: exportMemoryBackup(table) }
+    }
     if (args.action === 'import') {
         if (args.dryRun !== undefined && typeof args.dryRun !== 'boolean') return invalid('dryRun 必须为布尔值')
         let plan

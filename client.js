@@ -1016,11 +1016,11 @@ window.__ModuleLoader__.load({
                     if (revision === selection.current) setBackup(value);
                 } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
             };
-            const run = async (action, dryRun = true) => {
+            const run = async (action, dryRun = true, includeAudit = false) => {
                 setBusy(true); setMessage('');
                 try {
                     if (action === 'export') {
-                        const result = await call('manage', { action });
+                        const result = await call('manage', { action, ...(includeAudit ? { includeAudit: true } : {}) });
                         const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json;charset=utf-8' });
                         if (blob.size > MAX_BACKUP_BYTES) throw new Error('备份超过界面 10 MiB 限制，请使用管理工具导出');
                         const url = URL.createObjectURL(blob);
@@ -1028,11 +1028,13 @@ window.__ModuleLoader__.load({
                         link.href = url; link.download = `sleep-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
                         link.click();
                         setTimeout(() => URL.revokeObjectURL(url), 1000);
-                        setMessage('已生成备份下载，包含历史原文及来源。');
+                        setMessage(includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
                     } else {
-                        const result = await call('manage', { action, backup, dryRun });
+                        const result = await call('manage', {
+                            action, backup, dryRun, ...(!dryRun && backup.version === 2 ? { planToken: plan.planToken } : {}),
+                        });
                         if (dryRun) setPlan(result);
-                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条，跳过 ${result.skipped} 条。`); onChanged?.(); }
+                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次。`); onChanged?.(); }
                     }
                 } catch (error) {
                     setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
@@ -1042,10 +1044,12 @@ window.__ModuleLoader__.load({
                 h('h3', null, '备份与恢复'),
                 h('p', null, '备份包含全库历史与来源。导入先预演；同 ID 异内容会拒绝，发生 I/O 中断可用原文件重试。'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true) }, '下载记忆与审计备份'),
+                h('p', null, '审计备份保留回滚证据；会话绑定、调度、学习任务与用户反馈不包含在内。'),
                 h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
                 plan ? h('div', { role: 'status' },
-                    h('p', null, `将新增 ${plan.planned} 条，跳过 ${plan.skipped} 条。`),
+                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次，跳过 ${plan.skipped} 条记忆。`),
                     h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
                 message ? h('p', { role: 'status' }, message) : null);
         }
@@ -1057,10 +1061,12 @@ window.__ModuleLoader__.load({
             const [plan, setPlan] = useState(null);
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState('');
+            const [stats, setStats] = useState(null);
             const run = async (input) => {
                 setBusy(true); setMessage(''); setPlan(null);
                 try {
                     const result = await call('manage', input);
+                    if (input.action === 'sleepStats') { setStats(result); return; }
                     if (input.action === 'sleepHistory') {
                         if (input.batchId) setDetail(result);
                         if (!input.batchId) { setHistory(result); setDetail(null); }
@@ -1085,6 +1091,9 @@ window.__ModuleLoader__.load({
                     onClick: () => void run({ action: 'sleepHistory', limit: 10 }) }, '读取睡眠历史'),
                 h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
                     onClick: () => void run({ action: 'sleepRecover' }) }, '恢复中断批次'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepStats' }) }, '读取审计容量'),
+                stats ? h('p', { role: 'status' }, `审计 ${stats.batchCount} 个批次，JSON 内容 ${stats.retainedBytes.toLocaleString()} 字节（${(stats.retainedBytes / 1048576).toFixed(2)} MiB）；${stats.maxBytes ? `上限 ${(stats.maxBytes / 1048576).toFixed(2)} MiB` : '未设容量上限'}。`) : null,
                 history ? h('div', null,
                     h('p', null, `共 ${history.total} 个批次`),
                     history.items.map((batch) => h('div', { key: batch.id },
@@ -1590,6 +1599,7 @@ window.__ModuleLoader__.load({
           'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
           'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled',
           'sleepAuditEnabled', 'contextualRecallEnabled',
+          'sleepAuditMaxBytes',
           'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
@@ -1775,6 +1785,7 @@ window.__ModuleLoader__.load({
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
+            ['sleepAuditMaxBytes', '审计内容容量上限', '单位为字节，0 表示不限；达到上限后暂停新增睡眠批次且保留已有证据'],
           ]) {
             const field = fields[key];
             if (!field) continue;

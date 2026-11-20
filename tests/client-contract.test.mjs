@@ -152,6 +152,9 @@ test('配置页公开项目和评分开关，字符串保存经真实服务校�
         await host.api.setConfig({ changes: { sleepAuditEnabled: true, contextualRecallEnabled: true } })
         assert.equal(override.sleepAuditEnabled, true)
         assert.equal(override.contextualRecallEnabled, true)
+        await host.api.setConfig({ changes: { sleepAuditMaxBytes: 104857600 } })
+        assert.equal(override.sleepAuditMaxBytes, 104857600)
+        await assert.rejects(host.api.setConfig({ changes: { sleepAuditMaxBytes: -1 } }), /sleepAuditMaxBytes/)
     } finally { client.dispose() }
 })
 
@@ -174,6 +177,10 @@ test('睡眠审计界面使用真实批次预演并确认回滚', async () => {
         await flushTasks()
         tree = await client.render(panel.type, panel.props)
         assert.ok(flatten(tree).some((node) => node.children.includes(slept.auditId)))
+        flatten(tree).find((node) => node.children.includes('读取审计容量')).props.onClick()
+        await flushTasks()
+        tree = await client.render(panel.type, panel.props)
+        assert.ok(flatten(tree).some((node) => node.children.some((text) => typeof text === 'string' && text.includes('JSON 内容'))))
         flatten(tree).find((node) => node.children.includes('查看修改')).props.onClick()
         await flushTasks()
         tree = await client.render(panel.type, panel.props)
@@ -289,6 +296,39 @@ test('界面备份文件下载、大小限制、导入预演及确认调用真�
         panel = await client.render(node.type, node.props)
         assert.ok(flatten(panel).some((item) => item.children.some((text) => typeof text === 'string' && text.includes('导入完成'))))
     } finally { client.dispose() }
+})
+
+test('界面记忆与审计备份使用 v2 并携带预演凭据恢复', async () => {
+    const source = createHarness({ sleepAuditEnabled: true })
+    await source.table.put('smm_ui_backup', fixture('smm_ui_backup'))
+    await source.call('memory_sleep', {})
+    const backup = (await source.api.manage({ action: 'export', includeAudit: true })).backup
+    const host = createHarness()
+    const client = await createClient(host)
+    try {
+        const page = await client.render(client.components.get('main'))
+        const node = flatten(page).find((item) => item.type?.name === 'BackupPanel')
+        let panel = await client.render(node.type, node.props)
+        flatten(panel).find((item) => item.children.includes('下载记忆与审计备份')).props.onClick()
+        await flushTasks()
+        assert.ok(client.calls.some((entry) => entry.args[0]?.includeAudit === true))
+        await flatten(panel).find((item) => item.props.type === 'file').props.onChange({ target: {
+            files: [{ name: 'audit-backup.json', size: 3000, text: async () => JSON.stringify(backup) }],
+        } })
+        panel = await client.render(node.type, node.props)
+        flatten(panel).find((item) => item.children.includes('预演导入')).props.onClick()
+        await flushTasks()
+        panel = await client.render(node.type, node.props)
+        flatten(panel).find((item) => item.children.includes('确认导入')).props.onClick()
+        await flushTasks()
+        assert.equal((await host.api.manage({ action: 'sleepHistory' })).total, 1)
+        const confirmed = client.calls.find((entry) => entry.args[0]?.action === 'import' && entry.args[0].dryRun === false)
+        assert.ok(confirmed.args[0].planToken)
+    } finally {
+        client.dispose()
+        await host.dispose()
+        await source.dispose()
+    }
 })
 
 test('界面会话绑定按选择的 ID 生效，释放后显示全局回退', async () => {

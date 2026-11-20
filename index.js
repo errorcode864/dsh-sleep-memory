@@ -34,6 +34,7 @@ import { planLocalRecall } from './memory-query-plan.js'
 import { learningJobsDomainSpec } from './memory-learning-jobs.js'
 import { createFeedbackStore, feedbackDomainSpec } from './memory-feedback.js'
 import { createSleepAudit, sleepAuditDomainSpec } from './memory-sleep-audit.js'
+import { backupStateDomainSpec, createMemoryBackup } from './memory-backup.js'
 import { matchRecallTriggers, RECALL_TRIGGERS_SCHEMA } from './memory-triggers.js'
 import {
   runtimeDomainSpec, getSessionId, isSessionId, bindingKey, listWorkspaceScopes, resolveMemoryScope,
@@ -151,6 +152,7 @@ function resolveConfig(raw) {
   numberField('deepSummaryMaxChars', 'integer', 200, 8_000, 1_200)
   booleanField('sleepAuditEnabled', false)
   booleanField('contextualRecallEnabled', false)
+  numberField('sleepAuditMaxBytes', 'integer', 0, 2_147_483_647, 0)
 
   // ---- 扩散激活召回（M3）----------------------------------------------------
   numberField('spreadDepth', 'integer', 0, 3, 1) // 0 = 关闭扩散，仅直接命中
@@ -1311,6 +1313,7 @@ const GUI_CONFIG_FIELDS = [
   { key: 'sleepOnStart', type: 'boolean' },
   { key: 'sleepAuditEnabled', type: 'boolean' },
   { key: 'contextualRecallEnabled', type: 'boolean' },
+  { key: 'sleepAuditMaxBytes', type: 'integer', min: 0, max: 2147483647 },
   { key: 'projectId', type: 'string' },
   { key: 'injectMaxTotalChars', type: 'integer', min: 300, max: 32000 },
   { key: 'injectMaxEstimatedTokens', type: 'integer', min: 100, max: 16000 },
@@ -1526,7 +1529,7 @@ class SleepMemoryApiService {
 
   /** GUI 与工具复用相同写队列和参数校验，不开放物理遗忘入口。 */
   async manage(input) {
-    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover'].includes(input.action)) {
+    if (!input || !['correct', 'setState', 'export', 'import', 'bind', 'feedback', 'sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
     if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
@@ -1709,11 +1712,20 @@ export function apply(ctx, config) {
   const learningDomainPromise = cfg.autoLearnEnabled && cfg.learningPolicyMode === 'evidence'
     ? ctx.storageDomain.open(learningJobsDomainSpec(parseStoredRecord)) : null
   const feedbackDomainPromise = cfg.feedbackEnabled ? ctx.storageDomain.open(feedbackDomainSpec) : null
-  const auditDomainPromise = ctx.storageDomain.open(sleepAuditDomainSpec(parseStoredRecord))
+  const auditSpec = sleepAuditDomainSpec(parseStoredRecord)
+  const auditDomainPromise = ctx.storageDomain.open(auditSpec)
+  const backupDomainPromise = ctx.storageDomain.open(backupStateDomainSpec(parseStoredRecord, auditSpec.tables.records.valueSchema.parse))
   const audit = createSleepAudit(
     () => domainPromise.then((domain) => domain.table('records')),
     () => auditDomainPromise.then((domain) => domain.table('records')),
+    cfg.sleepAuditMaxBytes,
   )
+  const backup = createMemoryBackup({
+    openRecords: () => domainPromise.then((domain) => domain.table('records')),
+    openAudit: () => auditDomainPromise.then((domain) => domain.table('records')),
+    openState: () => backupDomainPromise.then((domain) => domain.table('records')),
+    parseRecord: parseStoredRecord, parseAudit: auditSpec.tables.records.valueSchema.parse, maxRecords: cfg.maxRecords,
+  })
   const feedback = feedbackDomainPromise
     ? createFeedbackStore(() => feedbackDomainPromise.then((domain) => domain.table('records'))) : null
   if (feedback) runtime.feedback = feedback.state
@@ -1722,6 +1734,7 @@ export function apply(ctx, config) {
   learningDomainPromise?.catch(() => {})
   feedbackDomainPromise?.catch(() => {})
   auditDomainPromise.catch(() => {})
+  backupDomainPromise.catch(() => {})
   ctx.effect(() => async () => {
     disposed = true
     clearTimeout(scheduleTimer)
@@ -1729,12 +1742,14 @@ export function apply(ctx, config) {
     await intelligence.drain()
     await mutations
     await audit.drain()
-    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise, auditDomainPromise].filter(Boolean))
+    await backup.drain()
+    const domains = await Promise.allSettled([domainPromise, runtimeDomainPromise, learningDomainPromise, feedbackDomainPromise, auditDomainPromise, backupDomainPromise].filter(Boolean))
     for (const domain of domains) if (domain.status === 'fulfilled') await domain.value.close()
   })
 
   // storage-domain 的 Domain 接口没有 tables 属性；表句柄须经 domain.table(name) 获取。
   const records = async () => {
+    await backup.recover()
     await audit.recover()
     return domainPromise.then((domain) => domain.table('records'))
   }
@@ -1787,7 +1802,21 @@ export function apply(ctx, config) {
     }
   }
   const manageExtended = async (args, execution, trustedFeedback = false) => {
-    if (['sleepHistory', 'sleepRollback', 'sleepRecover'].includes(args.action)) return audit.manage(args)
+    if (['sleepHistory', 'sleepRollback', 'sleepRecover', 'sleepStats'].includes(args.action)) {
+      if (args.action !== 'sleepHistory' && args.action !== 'sleepStats') await backup.recover()
+      return audit.manage(args)
+    }
+    if (args.action === 'export' && args.includeAudit === true) {
+      if (Object.keys(args).some((key) => !['action', 'includeAudit'].includes(key))) {
+        return { code: 'invalid_args', message: '审计备份导出参数包含未知字段' }
+      }
+      await records()
+      return { action: 'export', backup: await backup.export() }
+    }
+    if (args.action === 'import' && args.backup?.version === 2) {
+      await records()
+      return backup.import(args)
+    }
     return executeMemoryManagement(args, {
       table: await records(), cfg, parseRecord: parseStoredRecord, status,
       manageScope: (input) => manageScope(input, getSessionId(execution)),
@@ -2053,6 +2082,7 @@ export function apply(ctx, config) {
     export: '备份导出', import: '备份导入', status: '运行状态',
     setState: '有效性管理', scope: '会话范围', bind: '项目绑定',
     sleepHistory: '睡眠历史', sleepRollback: '睡眠回滚', sleepRecover: '中断恢复',
+    sleepStats: '审计容量',
   }
 
   /**
@@ -2073,6 +2103,7 @@ export function apply(ctx, config) {
         scope: `范围 ${value.scope?.projectId ?? '全局'}，来源 ${value.scope?.source}`,
         bind: `会话绑定已更新，当前范围 ${value.scope?.projectId ?? '全局'}`,
         sleepHistory: `睡眠批次 ${value.total ?? 0} 个`,
+        sleepStats: `审计 ${value.batchCount} 个批次，JSON 内容 ${value.retainedBytes} 字节`,
         sleepRecover: `已恢复 ${value.recovered ?? 0} 个睡眠批次`,
         sleepRollback: `${value.dryRun ? '预演' : '恢复完成'}：${value.batchId}`,
       }
@@ -2631,11 +2662,12 @@ export function apply(ctx, config) {
       'scope=读取当前会话解析范围；bind=绑定会话项目，null 表示全局，release:true 释放绑定。',
       'sleepHistory=分页读取睡眠审计，batchId 可展开修改；sleepRecover=恢复中断批次。',
       'sleepRollback=预演回滚，确认时传 dryRun:false 与 planToken；后续记忆已改变则拒绝覆盖。',
+      'sleepStats=审计容量与批次统计；export includeAudit:true 导出记忆和审计的 v2 备份，导入需预演 planToken。',
     ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback'], description: '记忆管理操作' },
+        action: { type: 'string', enum: ['list', 'forget', 'stats', 'get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'], description: '记忆管理操作' },
         layer: { type: 'string', enum: LAYERS, description: 'list 专用：限定记忆层（surface/deep/archive/salient）' },
         tag: { type: 'string', description: 'list 专用：限定标签，只列含该标签的记忆' },
         offset: { type: 'integer', description: 'list/get/sleepHistory 分页偏移量，默认 0' },
@@ -2652,12 +2684,13 @@ export function apply(ctx, config) {
         sessionId: { type: 'string', description: 'scope/bind 专用：缺省采用当前工具执行会话' },
         release: { type: 'boolean', description: 'bind 专用：true 释放显式绑定，回退工作区或配置' },
         batchId: { type: 'string', description: '睡眠审计批次 ID' },
+        includeAudit: { type: 'boolean', description: 'export 可选：true 导出含睡眠审计的 v2 备份' },
       },
       required: ['action'],
     },
     output: {
       schema: { oneOf: [MANAGE_LIST_OK_SCHEMA, MANAGE_FORGET_OK_SCHEMA, MANAGE_STATS_OK_SCHEMA,
-        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback'] } }, required: ['action'] },
+        { type: 'object', properties: { action: { type: 'string', enum: ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats'] } }, required: ['action'] },
         ERROR_SCHEMA] },
       render(_args, value) {
         return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
