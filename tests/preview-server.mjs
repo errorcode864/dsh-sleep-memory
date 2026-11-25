@@ -61,7 +61,7 @@ await new Promise((resolve,reject)=>{const script=document.createElement('script
 previewModules['react-dom/client'].createRoot(document.getElementById('root')).render(React.createElement(slots.get('main')));
 previewModules['react-dom/client'].createRoot(document.getElementById('config')).render(React.createElement(slots.get('plugins.bundle.config'),{view:'page'}));
 </script></html>`
-const methods = new Set(['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'])
+const methods = new Set(['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope', 'backupTransfer'])
 const server = createServer(async (request, response) => {
     try {
         if (request.method === 'POST' && request.url === '/api') {

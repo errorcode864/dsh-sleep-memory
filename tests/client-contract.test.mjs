@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
 import { webcrypto } from 'node:crypto'
 import { createHarness, createMessage, fixture, flushTasks, injectMessage } from './harness.mjs'
+import { CAPACITY_EXPORT, createCapacityBackup } from './capacity-fixtures.mjs'
 
 /** 执行真实 client 模块和 Remote 描述符；替身只提供宿主、React 生命周期。 */
 async function createClient(host) {
@@ -38,7 +39,7 @@ async function createClient(host) {
         useEffect: (effect) => pendingEffects.push(effect),
     }
     const remote = {}
-    for (const method of ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope']) {
+    for (const method of ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope', 'backupTransfer']) {
         remote[method] = async (...args) => {
             calls.push({ method, args })
             try { return { ok: true, value: await host.api[method](...args) } }
@@ -80,7 +81,7 @@ async function createClient(host) {
             createElement: () => ({ click() { downloads.push({ href: this.href, download: this.download }) } }),
             head: { appendChild: () => {} },
         },
-        Blob, crypto: webcrypto,
+        Blob, btoa, crypto: webcrypto,
         URL: { createObjectURL: () => 'blob:隔离测试备份', revokeObjectURL: (url) => revoked.push(url) },
         setTimeout, clearTimeout, setInterval, clearInterval, console,
     })
@@ -295,7 +296,7 @@ test('界面备份文件下载、大小限制、导入预演及确认调用真�
         assert.equal(client.downloads.length, 1)
         assert.match(client.downloads[0].download, /^sleep-memory-.*\.json$/)
         await flatten(panel).find((item) => item.props.type === 'file').props.onChange({ target: {
-            files: [{ name: 'too-large.json', size: 11 * 1024 * 1024 }],
+            files: [{ name: 'too-large.json', size: 160 * 1024 * 1024 + 1 }],
         } })
         panel = await client.render(node.type, node.props)
         assert.equal(flatten(panel).find((item) => item.children.includes('预演导入')).props.disabled, true)
@@ -712,6 +713,34 @@ test('叙述面板经真实 Remote 生成草稿并由用户确认保存及撤回
             assert.equal((await target.api.manage({ action: 'narrativeHistory', id: 'smm_narrative_ui' })).items[0].state, 'retracted')
             assert.ok(targetClient.calls.some((entry) => entry.args[0]?.backup?.version === 4 && entry.args[0].planToken))
         } finally { targetClient.dispose(); await target.dispose() }
+    } finally { client.dispose(); await host.dispose() }
+})
+
+test('备份面板分片上传真实大文件，只在用户确认后恢复', async () => {
+    const host = createHarness()
+    const client = await createClient(host)
+    try {
+        const backup = createCapacityBackup(1800, 'long')
+        const file = Object.assign(new Blob([JSON.stringify(backup, null, 2)]), { name: '大文件备份.json' })
+        assert.ok(file.size > 10 * 1024 * 1024)
+        assert.ok(Buffer.byteLength(JSON.stringify(backup)) > 10 * 1024 * 1024)
+        const page = await client.render(client.components.get('main'))
+        const panel = flatten(page).find((node) => node.type?.name === 'BackupPanel')
+        const render = () => client.render(panel.type, panel.props)
+        const tree = await render()
+        flatten(tree).find((node) => node.props.type === 'file').props.onChange({ target: { files: [file] } })
+        const preview = flatten(await render()).find((node) => node.children.includes('预演导入'))
+        await preview.props.onClick()
+        const ready = flatten(await render())
+        assert.ok(ready.some((node) => node.children.some((text) => typeof text === 'string' && text.includes('将新增 1800 条记忆'))))
+        assert.equal(host.data.size, 0)
+        await ready.find((node) => node.children.includes('确认导入')).props.onClick()
+        assert.equal(host.data.size, 1800)
+        assert.equal((await host.api.capabilities.manage(CAPACITY_EXPORT)).backup.checksum, backup.checksum)
+        const calls = client.calls.filter((call) => call.method === 'backupTransfer')
+        assert.deepEqual(calls.slice(-2).map((call) => call.args[0].action), ['preview', 'confirm'])
+        assert.ok(calls.filter((call) => call.args[0].action === 'append').length > 40)
+        assert.ok(client.registrations[0].descriptors.some((descriptor) => descriptor.method === 'backupTransfer'))
     } finally { client.dispose(); await host.dispose() }
 })
 

@@ -1081,7 +1081,7 @@ assert.ok(api1, 'GUI 服务应注册进 reflect')
 assert.deepEqual(api1.typertRemote, { service: api1, serviceKey: 'sleepMemoryApi', namespace: 'sleepMemoryApi' }, 'typertRemote 绑定形状')
 const gDescriptor = Object.getPrototypeOf(api1)['@deepseek-ai/dsh-typert-protocol/remote-methods']
 assert.equal(gDescriptor.version, 1, 'Remote 方法标记 version 1')
-assert.deepEqual(gDescriptor.methods.map((m) => m.method), ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'], '十个 Remote 方法')
+assert.deepEqual(gDescriptor.methods.map((m) => m.method), ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope', 'backupTransfer'], 'Remote 方法含界面专用备份传输入口')
 assert.ok(gDescriptor.methods.every((m) => m.invocation.kind === 'direct'), '全部 direct invocation')
 
 // 56. stats：只计活记录、分层计数、superseded/边数、最早最晚时间

@@ -35,6 +35,7 @@ import { learningJobsDomainSpec } from './memory-learning-jobs.js'
 import { createFeedbackStore, feedbackDomainSpec, outcomeMemoryReferences } from './memory-feedback.js'
 import { createSleepAudit, sleepAuditDomainSpec } from './memory-sleep-audit.js'
 import { backupStateDomainSpec, createMemoryBackup } from './memory-backup.js'
+import { createBackupTransfer, GUI_BACKUP_LIMIT } from './memory-backup-transfer.js'
 import { awakenedRecord, isDormant } from './memory-access.js'
 import { matchPreferenceContext, planResponsePreferences } from './memory-preferences.js'
 import { planReconsolidation } from './memory-reconsolidation.js'
@@ -1435,7 +1436,7 @@ const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-method
 /** Remote 方法集；`false` = 无参。 */
 const GUI_API_METHODS = {
   stats: false, list: true, edges: false, runSleep: true, getConfig: false, setConfig: true,
-  status: false, getRecord: true, manage: true, scope: true,
+  status: false, getRecord: true, manage: true, scope: true, backupTransfer: true,
 }
 /** GUI list 单条正文的线上截断长度（完整原文仍在持久层，客户端按需读片段）。 */
 const GUI_CONTENT_WIRE_CHARS = 2000
@@ -1500,6 +1501,11 @@ class SleepMemoryApiService {
   constructor(ctx, capabilities) {
     this.ctx = ctx
     this.capabilities = capabilities
+    this.transfer = createBackupTransfer(async (args) => {
+      const result = await capabilities.manage(args)
+      if (result.code) throw apiFail(result.code, result.message)
+      return result
+    }, apiFail)
     ctx.reflect.provide(API_SERVICE_KEY, this)
     // 冻结的 typert Remote 绑定，供网关 SRC 发现读取。
     this.typertRemote = Object.freeze({ service: this, serviceKey: API_SERVICE_KEY, namespace: API_NAMESPACE })
@@ -1689,7 +1695,7 @@ class SleepMemoryApiService {
       'narrativeDraft', 'narrativeConfirm', 'narrativeHistory', 'narrativeRetract'].includes(input.action)) {
       throw apiFail('bad-request', '不支持该界面管理操作')
     }
-    if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > 10 * 1024 * 1024) {
+    if (input.action === 'import' && Buffer.byteLength(JSON.stringify(input.backup ?? null), 'utf8') > GUI_BACKUP_LIMIT) {
       throw apiFail('bad-request', '界面导入文件不能超过 10 MiB')
     }
     const result = await this.capabilities.manage(input)
@@ -1697,10 +1703,15 @@ class SleepMemoryApiService {
     if (input.action === 'sleepHistory' && Buffer.byteLength(JSON.stringify(result), 'utf8') > 10 * 1024 * 1024) {
       throw apiFail('audit-too-large', '审计详情超过界面 10 MiB 限制，请使用管理工具读取')
     }
-    if (input.action === 'export' && Buffer.byteLength(JSON.stringify(result.backup), 'utf8') > 10 * 1024 * 1024) {
+    if (input.action === 'export' && Buffer.byteLength(JSON.stringify(result.backup), 'utf8') > GUI_BACKUP_LIMIT) {
       throw apiFail('backup-too-large', '备份超过界面 10 MiB 限制，请使用管理工具导出')
     }
     return result
+  }
+
+  /** 分片上传不经过模型工具，只有预演后的显式确认才能开始写入。 */
+  backupTransfer(input) {
+    return this.transfer.run(input)
   }
 
   async scope(input) {
@@ -1926,6 +1937,7 @@ export function apply(ctx, config) {
   backupDomainPromise.catch(() => {})
   ctx.effect(() => async () => {
     disposed = true
+    gui.transfer.dispose()
     clearTimeout(scheduleTimer)
     for (const controller of controllers) controller.abort()
     await intelligence.drain()
@@ -2042,7 +2054,7 @@ export function apply(ctx, config) {
   // ---- GUI 服务（M9）：Web 侧栏面板经 typert Remote 桥读取记忆库 ---------------
   // 能力闭包显式传入（records 句柄与睡眠循环），服务自身不触碰存储域配置；
   // 服务缺失或注册失败不影响任何工具与注入路径。
-  new SleepMemoryApiService(ctx, {
+  const gui = new SleepMemoryApiService(ctx, {
     openRecords: records,
     workspaceScopes,
     runSleepCycle: (dryRun) => runMemorySleep(dryRun),

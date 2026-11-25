@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { apply } from '../index.js'
 import { exportMemoryBackup } from '../memory-contract.js'
 import { fixture } from './harness.mjs'
+import { CAPACITY_EXPORT, createCapacityBackup } from './capacity-fixtures.mjs'
 
 // 在 Electron 的 Node 模式下读取已安装宿主组件；只写入本仓库 tmp 隔离目录。
 const appPackage = process.env.DSH_APP_PACKAGE
@@ -555,3 +556,28 @@ try {
     assert.equal((await narrativeRestored.api.manage({ action: 'import', backup: narrativeBackup })).plannedNarratives, 0)
     console.log('v4 真实存储验收通过：跨目录导入中断、关闭叙述时重载续写及撤回历史恢复一致。')
 } finally { await narrativeRestored.close() }
+
+const largeRoot = await mkdtemp(resolve(testRoot, 'host-v4-large-'))
+const largeConfig = { autoLearnEnabled: false, sleepIntervalMinutes: 0 }
+const largeBackup = createCapacityBackup(1800, 'long')
+const largeBytes = Buffer.from(JSON.stringify(largeBackup, null, 2))
+assert.ok(largeBytes.length > 10 * 1024 * 1024)
+const largeImporting = startInstance(largeConfig, { narrative: true }, largeRoot)
+try {
+    const { transferId, chunkBytes } = await largeImporting.api.backupTransfer({ action: 'start', bytes: largeBytes.length })
+    for (let offset = 0; offset < largeBytes.length; offset += chunkBytes) {
+        await largeImporting.api.backupTransfer({ action: 'append', transferId, offset,
+            data: largeBytes.subarray(offset, offset + chunkBytes).toString('base64') })
+    }
+    const plan = await largeImporting.api.backupTransfer({ action: 'preview', transferId })
+    assert.deepEqual([plan.planned, plan.plannedAudits, plan.plannedFeedback, plan.plannedNarratives], [1800, 1, 200, 1000])
+    assert.equal((await largeImporting.api.stats()).total, 0)
+    await assert.rejects(largeImporting.api.backupTransfer({ action: 'confirm', transferId, planToken: plan.planToken }), /叙述备份导入中断/)
+} finally { await largeImporting.close() }
+const largeRestored = startInstance(largeConfig, {}, largeRoot)
+try {
+    const { backup: restored } = await largeRestored.call('memory_manage', CAPACITY_EXPORT)
+    assert.equal(restored.checksum, largeBackup.checksum)
+    assert.equal((await largeRestored.api.manage({ action: 'narrativeHistory', id: 'smm_capacity_0', projectId: 'capacity-project' })).items[0].state, 'retracted')
+    console.log(`大文件 v4 真实存储验收通过：${(largeBytes.length / 1048576).toFixed(2)} MiB，上传预演、确认中断及重开后四域摘要一致。`)
+} finally { await largeRestored.close() }

@@ -4,7 +4,7 @@ title: 睡眠记忆文档索引
 type: index
 status: active
 owner: maintainer
-updated: 2026-11-20
+updated: 2026-11-25
 source_of_truth: code-and-decision
 ---
 
@@ -29,7 +29,7 @@ source_of_truth: code-and-decision
   - [睡眠审计与情境触发](decisions/memory-contextual-audit.md)（decision，active，更新于 2026-11-17）
   - [审计容量与备份恢复](decisions/memory-audit-backup.md)（decision，active，更新于 2026-11-20）
   - [分层衰减、休眠与偏好召回](decisions/memory-dormancy.md)（decision，active，更新于 2026-11-20）
-  - [休眠之后的开发路线](decisions/memory-next-plan.md)（decision，draft，更新于 2026-11-20）
+  - [休眠之后的开发路线](decisions/memory-next-plan.md)（decision，draft，更新于 2026-11-25）
   - [召回诊断与长期表达偏好](decisions/memory-recall-preferences.md)（decision，active，更新于 2026-11-20）
   - [多层来源追溯与审核时限验收](decisions/memory-source-tracing.md)（decision，active，更新于 2026-11-20）
   - [审核等待时限与短期结果缓存](decisions/memory-review-latency.md)（decision，active，更新于 2026-11-20）
@@ -38,7 +38,8 @@ source_of_truth: code-and-decision
   - [实际结果驱动的激励与警示](decisions/memory-outcome-feedback.md)（decision，active，更新于 2026-11-20）
   - [回忆细节收缩与原文对照](decisions/memory-recollection.md)（decision，active，更新于 2026-11-20）
   - [可选反思叙述与独立版本](decisions/memory-narrative.md)（decision，active，更新于 2026-11-20）
-  - [叙述历史备份与跨域恢复](decisions/memory-narrative-backup.md)（decision，active，更新于 2026-11-20）
+  - [叙述历史备份与跨域恢复](decisions/memory-narrative-backup.md)（decision，active，更新于 2026-11-25）
+  - [长记录与密集关联容量验证](decisions/memory-capacity.md)（decision，active，更新于 2026-11-25）
 
 ### 指南与运维
 

@@ -125,7 +125,10 @@ profile 的依赖名和 `dsh.profile.bundles` 使用 `dsh-sleep-memory`，
 ```sh
 npm test       # smoke 场景 + 可靠性与客户端契约测试
 npm run eval   # 确定性检索场景，不调用真实 LLM
+npm run bench:capacity -- --sizes 1000 --profiles short,long,dense # 容量验证
 ```
+
+容量测试分别报告内存替身与真实宿主磁盘结果，参数和边界见[容量验证](docs/decisions/memory-capacity.md)。
 
 ---
 
@@ -213,6 +216,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 `sleepStats` 可读取审计内容容量，`sleepAuditMaxBytes` 可限制新增批次。
 “备份恢复”提供额外的记忆与审计 v2 备份，支持预演和跨域中断恢复，默认 v1 格式保持兼容。
 启用叙述实验后可选择“下载含叙述历史的备份”生成 v4，同时保存解释版本与撤回状态，详见[叙述备份恢复](docs/decisions/memory-narrative-backup.md)。
+管理面板可预演并确认导入不超过 160 MiB 的 v4 文件；其他格式和界面下载仍限制 10 MiB。
 详细范围见[审计容量与备份恢复](docs/decisions/memory-audit-backup.md)。
 
 `contextualRecallEnabled` 开启后按记忆的 `recallTriggers: [{when, cues}]` 补充召回候选，

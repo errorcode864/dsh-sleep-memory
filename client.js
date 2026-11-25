@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
     const REMOTE_SERVICE = 'sleepMemoryApi';
     const REMOTE_NAMESPACE = 'sleepMemoryApi';
     const NOARG_METHODS = new Set(['stats', 'edges', 'getConfig', 'status']);
-    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'];
+    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope', 'backupTransfer'];
     const INPUT_CODEC = Object.freeze({
       mode: 'strict',
       typeSymbol: Symbol('sleepMemoryApi.input'),
@@ -859,6 +859,7 @@ window.__ModuleLoader__.load({
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
         const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+        const MAX_LARGE_BACKUP_BYTES = 160 * 1024 * 1024;
 
         /** 视图与底稿绑定同一版本，展开只读取而不强化记忆。 */
         function RecollectionPanel({ detail, onRefresh }) {
@@ -1275,22 +1276,43 @@ window.__ModuleLoader__.load({
         /** 文件在浏览器中选择与下载；导入持有同一份预演快照，修改文件后必须重新预演。 */
         function BackupPanel({ onChanged }) {
             const [backup, setBackup] = useState(null);
+            const [largeFile, setLargeFile] = useState(null);
             const [plan, setPlan] = useState(null);
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState('');
+            const [progress, setProgress] = useState('');
             const selection = useRef(0);
             const choose = async (event) => {
                 const revision = ++selection.current;
-                setBackup(null); setPlan(null); setMessage('');
+                setBackup(null); setLargeFile(null); setPlan(null); setMessage('');
                 const file = event.target.files?.[0];
                 if (!file) return;
                 try {
-                    if (!file.name.toLowerCase().endsWith('.json') || file.size > MAX_BACKUP_BYTES) {
-                        throw new Error('请选择不超过 10 MiB 的 JSON 备份文件');
+                    if (!file.name.toLowerCase().endsWith('.json') || file.size > MAX_LARGE_BACKUP_BYTES) {
+                        throw new Error('请选择不超过 160 MiB 的 JSON 备份文件');
+                    }
+                    if (file.size > MAX_BACKUP_BYTES) {
+                        setLargeFile(file);
+                        return;
                     }
                     const value = JSON.parse(await file.text());
                     if (revision === selection.current) setBackup(value);
                 } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
+            };
+            const previewLargeFile = async (file) => {
+                setProgress('正在上传备份：0%');
+                const { transferId, chunkBytes } = await call('backupTransfer', { action: 'start', bytes: file.size });
+                for (let offset = 0; offset < file.size; offset += chunkBytes) {
+                    const bytes = new Uint8Array(await file.slice(offset, offset + chunkBytes).arrayBuffer());
+                    let binary = '';
+                    for (let start = 0; start < bytes.length; start += 8192) {
+                        binary += String.fromCharCode(...bytes.subarray(start, start + 8192));
+                    }
+                    const { received } = await call('backupTransfer', { action: 'append', transferId, offset, data: btoa(binary) });
+                    setProgress(`正在上传备份：${Math.floor(received * 100 / file.size)}%`);
+                }
+                setProgress('正在校验备份并生成预演');
+                return { ...await call('backupTransfer', { action: 'preview', transferId }), transferId };
             };
             const run = async (action, dryRun = true, includeAudit = false, includeFeedback = false, includeNarratives = false) => {
                 setBusy(true); setMessage('');
@@ -1308,16 +1330,20 @@ window.__ModuleLoader__.load({
                         setMessage(includeNarratives ? '已生成包含叙述版本与撤回状态的 v4 备份。' : includeFeedback ? '已生成记忆、审计与用户反馈备份。' : includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
                         return;
                     }
-                    const result = await call('manage', {
-                        action, backup, dryRun, ...(!dryRun && [2, 3, 4].includes(backup.version) ? { planToken: plan.planToken } : {}),
-                    });
-                    if (dryRun) { setPlan(result); return; }
                     setPlan(null);
+                    if (!dryRun) setProgress('正在恢复备份');
+                    const result = largeFile
+                        ? dryRun ? await previewLargeFile(largeFile)
+                            : await call('backupTransfer', { action: 'confirm', transferId: plan.transferId, planToken: plan.planToken })
+                        : await call('manage', {
+                            action, backup, dryRun, ...(!dryRun && [2, 3, 4].includes(backup.version) ? { planToken: plan.planToken } : {}),
+                        });
+                    if (dryRun) { setPlan(result); return; }
                     setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次、${result.importedFeedback ?? 0} 条呈现与反馈、${result.importedNarratives ?? 0} 个叙述版本。`);
                     onChanged?.();
                 } catch (error) {
-                    setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
-                } finally { setBusy(false); }
+                    setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
+                } finally { setBusy(false); setProgress(''); }
             };
             return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '备份与恢复' },
                 h('h3', null, '备份与恢复'),
@@ -1328,11 +1354,12 @@ window.__ModuleLoader__.load({
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true, true) }, '下载含叙述历史的备份'),
                 h('p', null, 'v3 备份包含结果与撤回历史；会话绑定、调度和学习任务仍不包含在内。'),
                 h('p', null, 'v4 额外包含已保存的叙述版本；未确认草稿与模型配置不在备份中。'),
-                h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
-                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
+                h('label', null, '选择备份文件（v4 最大 160 MiB，旧版最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || (!backup && !largeFile), onClick: () => run('import') }, '预演导入'),
+                progress ? h('p', { role: 'status' }, progress) : null,
                 plan ? h('div', { role: 'status' },
                     h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次、${plan.plannedFeedback ?? 0} 条呈现与反馈、${plan.plannedNarratives ?? 0} 个叙述版本，跳过 ${plan.skipped} 条记忆和 ${plan.skippedNarratives ?? 0} 个叙述版本。`),
-                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
+                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => run('import', false) }, '确认导入')) : null,
                 message ? h('p', { role: 'status' }, message) : null);
         }
 
