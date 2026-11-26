@@ -1,6 +1,6 @@
 {
   "name": "dsh-sleep-memory",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "scripts": {
     "test": "node smoke.mjs && node --test tests/*.test.mjs",
     "eval": "node eval.mjs",
@@ -8,6 +8,7 @@
     "bench:search": "node tests/search-benchmark.mjs",
     "bench:retrieval": "node tests/retrieval-benchmark.mjs",
     "bench:capacity": "node tests/capacity-benchmark.mjs",
+    "trial:project": "node tests/project-trial-cli.mjs",
     "eval:model": "node tests/live-model-eval.mjs",
     "eval:preferences": "node tests/preference-eval.mjs",
     "eval:evidence": "node tests/recall-evidence-eval.mjs",

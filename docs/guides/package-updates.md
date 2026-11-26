@@ -4,7 +4,7 @@ title: npm 发布与远端更新
 type: runbook
 status: active
 owner: maintainer
-updated: 2026-11-10
+updated: 2026-11-26
 source_of_truth: code-and-config-and-external
 environment: GitHub Actions、npm 账号与远端 DSH profile
 verification: 2026-11-10 已通过 Actions 运行 42740185232，验证 OIDC 发布、npm 双通道、dist 制品一致性与 GitHub Release
@@ -18,6 +18,7 @@ verification: 2026-11-10 已通过 Actions 运行 42740185232，验证 OIDC 发�
 
 ## 目录
 
+- [0.6.0 更新内容](#060-更新内容)
 - [发布流程](#发布流程)
 - [前置准备](#前置准备)
 - [补建 0.4.0 的发布链路](#补建-040-的发布链路)
@@ -26,6 +27,22 @@ verification: 2026-11-10 已通过 Actions 运行 42740185232，验证 OIDC 发�
 - [后续发版](#后续发版)
 - [排查更新失败](#排查更新失败)
 - [依据](#依据)
+
+## 0.6.0 更新内容
+
+本版汇总 `0.5.0` 之后的记忆可靠性、召回与试用工具改动：
+
+- 睡眠审计记录批次证据，支持回滚预演、冲突检查、中断恢复和容量限制。
+- 长期偏好与情境触发补充召回候选，诊断显示候选遗漏、审核拒绝和预算过滤原因。
+- 分层衰减与休眠支持相关情境唤醒，深层概要可跨批次再巩固并追溯原始来源。
+- 逐层取证受深度、条数与 Token 预算约束，明确结果可形成激励与警示反馈。
+- 回忆视图支持细节收缩及原文对照，可选反思叙述保留独立版本与用户确认。
+- v4 备份覆盖叙述历史，GUI 分片导入上限为 160 MiB；冷分词优化附有同样本容量对照。
+- `trial:project` 提供 30 轮人工台账，校验项目范围、重复消息和证据完整性并分别汇总实报与估算用量。
+
+升级保留现有存储域和 profile 配置，新增能力按各自开关启用；本机试用配置不会随包分发。
+休眠与深层再巩固要求开启睡眠审计，审计开启期间暂停物理遗忘；叙述实验默认关闭。
+单项目长期试用仍在采样准备阶段，当前 0/30 轮；自动化检查不代表长期效果已经验收。
 
 ## 发布流程
 
@@ -75,7 +92,7 @@ npm 发布及通道管理使用 **Trusted Publisher（OIDC）**，工作流不�
 工作流使用 GitHub 托管 Runner、Node 24 与 npm 11；无需额外的长期 npm Token。
 
 工作流和 `.github/scripts/` 必须一起提交到默认分支，才能使用新版手动入口。
-推送命令由维护者执行，或在获得明确授权后由代理执行。
+推送命令由维护者手动执行，代理遵守当前工作区禁止 `git push` 的约束。
 
 ## 补建 0.4.0 的发布链路
 
@@ -167,8 +184,8 @@ pnpm install
 ## 后续发版
 
 1. 修改代码并运行 `npm test`、`npm run eval` 和 `node --test .github/scripts/release.test.mjs`。
-2. 用 `npm version patch --no-git-tag-version` 升级版本。
-3. 提交并推送，再打 tag：`git tag v<version> && git push origin v<version>`。
+2. 按改动范围升级 `package.json` 版本并同步更新说明，新增能力使用 minor 版本。
+3. 提交到 `main` 并创建对应 Tag，维护者手动执行 `git push --atomic origin main v<version>`。
 4. 工作流自动发布 dev 与 latest；在 npm 包页确认 dist-tags。
 5. 打开 DSH 插件页或重新检查版本，确认更新提示，再执行更新。
 6. 核对安装版本、记忆记录数量、记忆银行和配置保存。

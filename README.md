@@ -20,6 +20,8 @@
 > 不承诺长期维护与全环境兼容。如您有类似需求，欢迎 Fork 或参考。
 > 当前实现以规则聚类、概要和词频联想组织外部记忆，不修改模型权重。
 
+`0.6.0` 新增审计回滚、偏好与情境召回、休眠唤醒、逐层取证、结果反馈和叙述备份，详见[版本更新说明](docs/guides/package-updates.md#060-更新内容)。
+
 ---
 
 ## 为什么选择 dsh-sleep-memory
@@ -127,6 +129,7 @@ npm test       # smoke 场景 + 可靠性与客户端契约测试
 npm run eval   # 确定性检索场景，不调用真实 LLM
 npm run bench:capacity -- --sizes 1000 --profiles short,long,dense # 容量验证
 npm run bench:retrieval -- --size 1000 --profile varied # 不同长正文的冷暖索引对照
+npm run trial:project -- --init --project dsh-plugins # 初始化单项目人工试用台账
 ```
 
 容量测试分别报告内存替身与真实宿主磁盘结果，参数和边界见[容量验证](docs/decisions/memory-capacity.md)。

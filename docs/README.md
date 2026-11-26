@@ -44,7 +44,7 @@ source_of_truth: code-and-decision
 ### 指南与运维
 
 - [进入指南与运维领域索引](guides/README.md)
-  - [npm 发布与远端更新](guides/package-updates.md)（runbook，active，更新于 2026-11-10）
+  - [npm 发布与远端更新](guides/package-updates.md)（runbook，active，更新于 2026-11-26）
   - [可靠记忆使用与验证](guides/reliability.md)（guide，active，更新于 2026-11-20）
-  - [真实模型评测与单项目试用](guides/model-trial.md)（guide，active，更新于 2026-11-20）
+  - [真实模型评测与单项目试用](guides/model-trial.md)（guide，active，更新于 2026-11-26）
 <!-- DOCS-INDEX:END -->
