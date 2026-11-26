@@ -1,5 +1,11 @@
 import { performance } from 'node:perf_hooks'
+import { execFileSync } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHarness, createMessage, fixture, injectMessage } from './tests/harness.mjs'
+import { estimateTokens } from './memory-metrics.js'
+import { measureRetrieval, summarizeEvaluation } from './memory-evaluation.js'
 
 // 固定场景用于监测检索契约退化，不代替真实用户问题或 LLM 效果评测。
 const memory = createHarness({ injectMinScore: 0.5 })
@@ -142,3 +148,137 @@ console.table(results)
 const passed = results.filter((result) => result.通过).length
 console.log(`确定性检索评测：${passed}/${results.length}。未调用真实 LLM，不代表同义改写的总体召回率。`)
 if (passed !== results.length) process.exitCode = 1
+
+const args = process.argv.slice(2)
+const options = {}
+for (let index = 0; index < args.length; index += 2) {
+    if (!['--cases', '--report', '--baseline-ref', '--aliases'].includes(args[index]) || !args[index + 1]) {
+        throw new Error('评测参数要求 --cases、--report、--baseline-ref 或 --aliases 后接具体值')
+    }
+    options[args[index].slice(2)] = args[index + 1]
+}
+const root = dirname(fileURLToPath(import.meta.url))
+const dataset = JSON.parse(await readFile(resolve(root, options.cases ?? 'tests/fixtures/recall-cases.json'), 'utf8'))
+if (dataset.version !== 1 || !Array.isArray(dataset.records) || !Array.isArray(dataset.cases)
+    || dataset.cases.some((item) => typeof item.id !== 'string' || typeof item.query !== 'string'
+        || !Array.isArray(item.expected) || !item.expected.every((id) => typeof id === 'string'))) {
+    throw new Error('评测数据必须为 v1 格式，并为每条问题提供 ID、query 和 expected')
+}
+const recordIds = new Set(dataset.records.map((record) => record.id))
+if (recordIds.size !== dataset.records.length || new Set(dataset.cases.map((item) => item.id)).size !== dataset.cases.length
+    || dataset.cases.some((item) => [...item.expected, ...(item.explicitExpected ?? [])].some((id) => !recordIds.has(id)))) {
+    throw new Error('评测 ID 不能重复，相关性标签必须引用已有记忆')
+}
+
+async function evaluateDataset(implementation, config = {}) {
+    const samples = []
+    for (const scenario of dataset.cases) {
+        for (const mode of ['automatic', 'explicit']) {
+            const harness = createHarness({
+                projectId: scenario.projectId ?? '', recallBudget: 5, injectBudget: 5, injectMaxTotalChars: 32000,
+                ...config,
+            }, implementation ? { apply: implementation } : {})
+            for (const record of dataset.records) await harness.table.put(record.id, fixture(record.id, record))
+            const startedAt = performance.now()
+            const response = mode === 'automatic'
+                ? await injectMessage(harness, createMessage(scenario.query, scenario.id))
+                : await harness.call('memory_recall', {
+                    query: scenario.query, projectId: scenario.projectId ?? null, limit: 5,
+                    ...(scenario.includeGlobal === false ? { includeGlobal: false } : {}),
+                })
+            const durationMs = Number((performance.now() - startedAt).toFixed(3))
+            const ids = mode === 'automatic'
+                ? response.messages.find((message) => message.source?.kind === 'sleep-memory')?.source.recalled ?? []
+                : response.hits.map((hit) => hit.id)
+            const outputText = mode === 'automatic'
+                ? response.messages.find((message) => message.source?.kind === 'sleep-memory')?.content[0].text ?? ''
+                : JSON.stringify(response, null, 2)
+            const status = await harness.api.status()
+            samples.push({
+                id: scenario.id, mode, source: scenario.source, knownGap: scenario.knownGap ?? null,
+                expectedIds: mode === 'explicit' ? scenario.explicitExpected ?? scenario.expected : scenario.expected,
+                actualIds: ids, durationMs, estimatedOutputTokens: estimateTokens(outputText),
+                plan: status.recallPlan?.last ?? null,
+                modelCalls: Object.values(status.metrics?.models ?? {}).reduce((sum, stage) => sum + stage.calls, 0),
+                requiredTextPresent: scenario.requiredText ? (mode === 'automatic' ? outputText
+                    : response.hits.filter((hit) => (scenario.explicitExpected ?? scenario.expected).includes(hit.id))
+                        .map((hit) => hit.content).join('\n')).includes(scenario.requiredText) : null,
+                ...measureRetrieval(mode === 'explicit' ? scenario.explicitExpected ?? scenario.expected : scenario.expected, ids),
+            })
+            await harness.dispose()
+        }
+    }
+    return {
+        summary: Object.fromEntries(['automatic', 'explicit'].map((mode) =>
+            [mode, summarizeEvaluation(samples.filter((sample) => sample.mode === mode))])),
+        userCases: Object.fromEntries(['automatic', 'explicit'].map((mode) =>
+            [mode, summarizeEvaluation(samples.filter((sample) => sample.mode === mode && sample.source === 'user-provided'))])),
+        samples,
+    }
+}
+
+const current = await evaluateDataset()
+const shadow = await evaluateDataset(undefined, { recallPlanMode: 'shadow' })
+const local = await evaluateDataset(undefined, { recallPlanMode: 'local' })
+const aliases = options.aliases ? JSON.parse(await readFile(resolve(root, options.aliases), 'utf8')) : null
+const localWithAliases = aliases ? await evaluateDataset(undefined, { recallPlanMode: 'local', recallAliases: aliases }) : null
+const baseline = { ref: options['baseline-ref'] ?? null, result: null }
+if (baseline.ref) {
+    const revision = execFileSync('git', ['rev-parse', '--verify', `${baseline.ref}^{commit}`], { cwd: root, encoding: 'utf8' }).trim()
+    await mkdir(resolve(root, 'tmp'), { recursive: true })
+    const snapshotRoot = await mkdtemp(resolve(root, 'tmp/eval-baseline-'))
+    const files = execFileSync('git', ['ls-tree', '--name-only', revision], { cwd: root, encoding: 'utf8' })
+        .split('\n').filter((file) => file.endsWith('.js') || file === 'package.json')
+    for (const file of files) {
+        await writeFile(resolve(snapshotRoot, file), execFileSync('git', ['show', `${revision}:${file}`], { cwd: root }))
+    }
+    baseline.revision = revision
+    baseline.result = await evaluateDataset((await import(pathToFileURL(resolve(snapshotRoot, 'index.js')).href)).apply)
+}
+
+const report = {
+    version: 1, generatedAt: new Date().toISOString(),
+    dataset: options.cases ?? 'tests/fixtures/recall-cases.json',
+    boundary: '离线标签评测；未调用真实 LLM；Token 为字符估算；不代表线上总体准确率。',
+    deterministic: { passed, total: results.length }, current, baseline, shadow, local,
+    configuredAliases: aliases ? { source: options.aliases, count: aliases.length, result: localWithAliases } : null,
+}
+const reportPath = resolve(root, options.report ?? 'tmp/evaluation-latest.json')
+await mkdir(dirname(reportPath), { recursive: true })
+await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+console.table(Object.entries(current.summary).map(([mode, value]) => ({
+    模式: mode, 问题数: value.queries, 'Precision@5': value.precisionAt5, 'Recall@5': value.recallAt5,
+    误召回条数: value.falsePositives, 漏召回条数: value.falseNegatives,
+    P95毫秒: value.p95Ms, 输出Token估算: value.estimatedOutputTokens,
+})))
+console.table(current.samples.filter((sample) => sample.falsePositives || sample.falseNegatives).map((sample) => ({
+    场景: sample.id, 模式: sample.mode, 误召回: sample.falsePositives, 漏召回: sample.falseNegatives,
+    已知缺口: sample.knownGap ?? '需核对',
+})))
+console.table([['off', current], ['shadow', shadow], ['local', local], ...(localWithAliases ? [['local+配置词表', localWithAliases]] : [])]
+    .flatMap(([plan, result]) => Object.entries(result.summary).map(([mode, value]) => ({
+        规划: plan, 路径: mode, 'Precision@5': value.precisionAt5, 'Recall@5': value.recallAt5,
+        误召回: value.falsePositives, 漏召回: value.falseNegatives, P95毫秒: value.p95Ms,
+        输出Token估算: value.estimatedOutputTokens,
+        模型调用: result.samples.filter((sample) => sample.mode === mode).reduce((sum, sample) => sum + sample.modelCalls, 0),
+    }))))
+if (shadow.samples.some((sample, index) => JSON.stringify(sample.actualIds) !== JSON.stringify(current.samples[index].actualIds))) {
+    throw new Error('影子模式改变了实际选择')
+}
+if (baseline.result) {
+    console.table(['automatic', 'explicit'].map((mode) => ({
+        模式: mode, 基线Token估算: baseline.result.summary[mode].estimatedOutputTokens,
+        当前Token估算: current.summary[mode].estimatedOutputTokens,
+        基线漏召回: baseline.result.summary[mode].falseNegatives, 当前漏召回: current.summary[mode].falseNegatives,
+        基线误召回: baseline.result.summary[mode].falsePositives, 当前误召回: current.summary[mode].falsePositives,
+        基线片段遗漏: baseline.result.samples.filter((sample) => sample.mode === mode && sample.requiredTextPresent === false).length,
+        当前片段遗漏: current.samples.filter((sample) => sample.mode === mode && sample.requiredTextPresent === false).length,
+    })))
+}
+console.log(`离线标注评测已输出：${reportPath}；${report.boundary}`)
+if (baseline.result && current.samples.some((sample, index) =>
+    sample.falsePositives > baseline.result.samples[index].falsePositives
+    || sample.falseNegatives > baseline.result.samples[index].falseNegatives
+    || (sample.requiredTextPresent === false && baseline.result.samples[index].requiredTextPresent === true))) {
+    process.exitCode = 1
+}

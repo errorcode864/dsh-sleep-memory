@@ -103,11 +103,17 @@ export function nextSleepTime(state, cfg, loadedAt, now = Date.now()) {
 }
 
 /** 内容版本排除强化计数，避免一次召回令相同正文绕过去重。 */
-export function memoryVersion(record, lifecycle) {
+export function memoryVersion(record, lifecycle, includeEvidence = false) {
     return backupChecksum({
         id: record.id, content: record.content, gist: record.gist,
         projectId: record.projectId ?? null, source: record.source, lifecycle,
         replaces: record.replaces, layer: record.layer,
+        recallTriggers: record.recallTriggers,
+        access: record.access,
+        ...(includeEvidence ? {
+            learning: record.learning, supersededBy: record.supersededBy,
+            sources: record.edges.filter((edge) => ['consolidates', 'revises'].includes(edge.relation)),
+        } : {}),
     })
 }
 
@@ -132,6 +138,10 @@ export function createInjectionTracker(maxSessions = 200, maxEntries = 200) {
         seen(session, version, repeatAfter) {
             const turn = session.entries.get(version)
             return repeatAfter > 0 && turn !== undefined && session.turn - turn < repeatAfter
+        },
+        /** 临时要求结束后允许重新呈现同版本的长期偏好。 */
+        allowNext(session, version) {
+            session.entries.delete(version)
         },
         remember(session, versions) {
             for (const version of versions) {

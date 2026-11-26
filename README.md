@@ -20,6 +20,8 @@
 > 不承诺长期维护与全环境兼容。如您有类似需求，欢迎 Fork 或参考。
 > 当前实现以规则聚类、概要和词频联想组织外部记忆，不修改模型权重。
 
+`0.6.0` 新增审计回滚、偏好与情境召回、休眠唤醒、逐层取证、结果反馈和叙述备份，详见[版本更新说明](docs/guides/package-updates.md#060-更新内容)。
+
 ---
 
 ## 为什么选择 dsh-sleep-memory
@@ -125,7 +127,12 @@ profile 的依赖名和 `dsh.profile.bundles` 使用 `dsh-sleep-memory`，
 ```sh
 npm test       # smoke 场景 + 可靠性与客户端契约测试
 npm run eval   # 确定性检索场景，不调用真实 LLM
+npm run bench:capacity -- --sizes 1000 --profiles short,long,dense # 容量验证
+npm run bench:retrieval -- --size 1000 --profile varied # 不同长正文的冷暖索引对照
+npm run trial:project -- --init --project dsh-plugins # 初始化单项目人工试用台账
 ```
+
+容量测试分别报告内存替身与真实宿主磁盘结果，参数和边界见[容量验证](docs/decisions/memory-capacity.md)。
 
 ---
 
@@ -144,7 +151,11 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 
 - **`memory_write`**：写入事实或经历，支持项目范围（`projectId`）、来源溯源与事件时间；显著情绪记忆需通过效价/唤醒度阈值。
 - **`memory_recall`**：BM25 检索 + salience 加成；沿 REM 联想边扩散激活带出关联记忆（附 `via` 标注，不计入强化）；支持 `since`/`until` 时间窗与 `timeField: "occurredAt"` 事件范围检索。
-- **呈现即修饰**：默认 `fidelity: "recall"` 返回记忆化呈现（久远记忆是被时间修饰过的印象梗概，附 `drift` 说明）；`raw` 模式取原文；`memory_manage get` 按 ID 追溯完整原文与纠正链。
+- **先摘要再读证据**：默认 `fidelity: "summary"` 返回相关原句和记忆 ID，省略内容时标注 `truncated`；`memory_manage get` 按 ID 读取完整原文、学习证据与纠正链，`recall` 和 `raw` 保留原有呈现方式。
+- **多层来源追溯**：`memory_manage traceSources` 按巩固关系展开来源路径，限制深度、条数和 Token 估算；原文弹窗可逐层展开和单独读取完整证据，详见[来源追溯说明](docs/decisions/memory-source-tracing.md)。
+- **回忆与原文对照**：`memory_manage recollect` 提供按年龄收缩的经历片段、更多细节与完整底稿；事实、偏好和显著记忆保留全文，省略范围与版本均可核对，详见[回忆视图](docs/decisions/memory-recollection.md)。
+- **可选反思叙述**：开启 `narrativeEnabled` 后可在原文弹窗生成、核对并保存独立反思版本；原文完整保留，推断不进入事实召回，详见[叙述实验](docs/decisions/memory-narrative.md)。
+- **消耗可见**：运行详情分别统计学习、审核、查询扩展和情绪评分的模型实报 Token 与字符估算，自动注入同时受字符预算和 Token 估算预算限制。
 
 ### 睡眠整理（memory_sleep）
 
@@ -170,7 +181,7 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
   salient 记忆；已有情绪记忆和显式写入不受影响。
 
 学习和审核使用当前会话的模型路由，会增加模型调用。学习不阻塞主对话，
-审核默认最多等待 3 秒。记忆银行的运行状态可查看写入、重复、待复核、审核拒绝和失败原因。
+审核默认最多等待 15 秒，已有显式时限继续生效。记忆银行的运行状态可查看写入、重复、待复核、审核拒绝和失败原因。
 详细范围、证据与运行边界见[可靠记忆使用与验证](docs/guides/reliability.md)。
 
 单字和数字不再统一丢弃：独立术语与明确的端口、状态码、字段赋值仍可参与召回。
@@ -178,6 +189,14 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 例如 `del_flag` 不会因共享 `flag` 命中 `status_flag`，`0/1` 不会命中 IP 中的数字，
 `Spring Boot 3.2.11` 也不会被仅描述 `3.2.12` 的记忆替代。
 显式召回的 `retrieval` 字段会解释命中的词、实体与查询覆盖度。
+
+### 本地检索与学习闭环（可选）
+
+不外接嵌入模型，不引入向量服务；本地分词缓存复用已有分析结果。
+`recallPlanMode: "shadow"` 只比较候选，`"local"` 启用强词与覆盖度筛选，可通过 `recallAliases` 配置项目术语。
+`learningPolicyMode: "evidence"` 支持短偏好证据与跨重载学习去重。
+`feedbackEnabled` 在原文详情提供有用、无关、错误、过时和撤回入口，`feedbackRankingEnabled` 单独控制有限排序调整。
+新增模式默认关闭或保持旧策略，具体配置与验证边界见[本地检索、学习与反馈](docs/guides/reliability.md#本地检索学习与反馈)。
 
 ### 语义扩展召回（可选）
 
@@ -193,6 +212,58 @@ npm run eval   # 确定性检索场景，不调用真实 LLM
 - **富工具卡片**：四个工具均投喂 Web 卡片，直播流式与日志回放渲染一致。
 - **内联配置区**：插件详情页直接编辑常用配置字段，改动经宿主编辑器持久化，即时生效。
 
+### 睡眠审计与情境触发（可选）
+
+`sleepAuditEnabled` 开启后保存每次睡眠的完整修改批次，支持中断恢复和预演回滚。
+管理面板的“睡眠审计”可查看历史与修改详情，后续修改发生冲突时拒绝覆盖。
+审计模式暂停物理遗忘；回滚保留证据并停用新概要。
+`sleepStats` 可读取审计内容容量，`sleepAuditMaxBytes` 可限制新增批次。
+“备份恢复”提供额外的记忆与审计 v2 备份，支持预演和跨域中断恢复，默认 v1 格式保持兼容。
+启用叙述实验后可选择“下载含叙述历史的备份”生成 v4，同时保存解释版本与撤回状态，详见[叙述备份恢复](docs/decisions/memory-narrative-backup.md)。
+管理面板可预演并确认导入不超过 160 MiB 的 v4 文件；其他格式和界面下载仍限制 10 MiB。
+详细范围见[审计容量与备份恢复](docs/decisions/memory-audit-backup.md)。
+
+`contextualRecallEnabled` 开启后按记忆的 `recallTriggers: [{when, cues}]` 补充召回候选，
+正文没有共同词语时也能通过明确情境短语找到经历。
+候选仍受项目、时间、有效性、精确实体约束与相关性审核限制。
+两个开关均默认关闭，完整接口与验证边界见[睡眠审计与情境触发](docs/decisions/memory-contextual-audit.md)。
+真实模型评测入口为 `npm run eval:model -- --check`，配置及试用步骤见[模型试用指南](docs/guides/model-trial.md)。
+
+### 慢衰减与按需唤醒（可选）
+
+`deepDecayHalfLifeDays` 和 `archiveDecayHalfLifeDays` 可分别延长深层与归档半衰期，默认 `0` 沿用普通值。
+开启 `dormancyEnabled` 和睡眠审计后，长期未使用且强度低的记忆进入休眠，保留原文及巩固关系。
+情境条件或联想路径命中后，通过呈现筛选的候选才会写入唤醒审计；审核拒绝或预算不足不会唤醒。
+面板可查看休眠状态、唤醒路径并预演回滚，具体边界见[分层衰减、休眠与偏好召回](docs/decisions/memory-dormancy.md)。
+
+情境召回同时补充有用户证据的回复语言偏好，支持“简体中文回复”与“使用哪种语言”等问法差异。
+此规则不覆盖任意同义句，候选仍需经过既有范围与审核流程。
+
+### 深层概要再巩固（可选）
+
+开启 `reconsolidationEnabled` 和睡眠审计后，同主题新证据或来源纠正可生成概要的新版本。
+每次从原始来源重新摘录，保留旧版本及来源路径；没有新证据时不重复建版本。
+原文弹窗可查看前后版本，审计支持中断恢复和预演回滚，边界见[深层再巩固](docs/decisions/memory-reconsolidation.md)。
+
+开启 `progressiveRecallEnabled` 后，模型可在概要不足时调用 `memory_manage expandRecall` 逐层读取来源。
+同一用户轮次共享深度、条数和 Token 预算；跨会话、未发现的 ID 或已变化的来源路径会被拒绝。
+原文预览保持只读，具体接口与预算边界见[按需逐层取证](docs/decisions/memory-progressive-recall.md)。
+
+### 召回诊断与长期表达偏好
+
+运行面板显示最近 20 次召回的候选、审核、返回数量及过滤原因，区分漏召回、拒绝、超时和预算不足。
+`recallDiagnosticsEnabled` 默认开启，仅保留计数与记忆 ID，不记录问题或记忆正文。
+`preferenceRecallEnabled` 默认关闭，开启后可在普通任务中应用有用户证据的语言、详略和格式偏好。
+当前明确要求覆盖本轮偏好，后续恢复长期偏好；项目偏好优先且冲突不自动裁决。
+范围、审核与预算继续生效，详细规则和评测边界见[召回诊断与长期表达偏好](docs/decisions/memory-recall-preferences.md)。
+配置页可调整审核时限和 `recallReviewCacheSeconds`，缓存默认关闭；开启后同会话、同问题、同版本候选可短期复用审核结果，见[审核等待与缓存](docs/decisions/memory-review-latency.md)。
+
+### 实际结果的激励与警示（可选）
+
+开启 `feedbackEnabled` 后，可在原文弹窗核对并确认成功或失败结果，关联情境、做法和原始证据。
+额外开启 `outcomeRecallEnabled`，同类情境会出现有证据的激励或警示；反例、纠正与撤回会调整提示。
+结果不由情绪分数推断，也不改写记忆强度；含反馈的 v3 备份可恢复结果历史，见[结果反馈说明](docs/decisions/memory-outcome-feedback.md)。
+
 ---
 
 ## 项目结构
@@ -205,6 +276,12 @@ sleep-memory/
 ├── memory-runtime.js       # 睡眠、评分、召回管线
 ├── memory-intelligence.js  # 后台知识提取、证据校验与召回审核
 ├── memory-retrieval.js     # 中文词级分析、技术实体保护与加权检索
+├── memory-search-index.js  # 逐条分词缓存与范围内词频
+├── memory-query-plan.js    # 本地强词筛选与项目术语通道
+├── memory-learning-jobs.js # 已验证候选持久化与恢复
+├── memory-feedback.js     # 实际呈现与明确用户反馈
+├── memory-access.js       # 可回滚休眠与唤醒状态
+├── memory-preferences.js  # 回复语言偏好的候选补充
 ├── memory-management.js    # memory_manage 工具实现
 ├── eval.mjs / smoke.mjs    # 检索基线 / 冒烟测试
 ├── locale/                 # 插件管理页双语标题与描述
@@ -229,16 +306,33 @@ sleep-memory/
 | `sleepIntervalMinutes` | 360 | 定时睡眠间隔，0 关闭 |
 | `sleepOnStart` | false | 加载时按期补跑 |
 | `decayHalfLifeDays` | 14 | 衰减基准半衰期（天），随重要度放大 |
+| `deepDecayHalfLifeDays` | 0 | 深层专用半衰期，0 沿用普通值 |
+| `archiveDecayHalfLifeDays` | 0 | 归档专用半衰期，0 沿用普通值 |
+| `dormancyEnabled` | false | 开启休眠，要求同时开启 `sleepAuditEnabled` |
+| `reconsolidationEnabled` | false | 根据新增或更新的来源生成深层概要新版本，要求开启睡眠审计 |
+| `progressiveRecallEnabled` | false | 模型在概要不足时主动逐层展开来源 |
+| `recallEvidenceMaxDepth` | 3 | 来源展开最大深度，范围 1 至 8 |
+| `recallEvidenceMaxNodes` | 20 | 当前取证窗口共享的来源条数，最多 100 |
+| `recallEvidenceMaxEstimatedTokens` | 2000 | 取证响应累计 Token 估算预算，范围 300 至 16000 |
+| `dormantAfterDays` | 90 | 进入休眠所需的闲置天数 |
+| `dormantStrengthLine` | 0.15 | 进入休眠所需的强度上限 |
 | `deleteArchiveAfterDays` | 90 | 归档记录触发彻底删除的闲置天数 |
 | `injectEnabled` | true | 自动注入总开关 |
 | `injectBudget` | 3 | 单次注入条数上限，0 关闭注入 |
 | `injectMaxTotalChars` | 4000 | 整个注入块的字符预算 |
+| `injectMaxEstimatedTokens` | 900 | 整个注入块的 Token 估算预算，与字符预算同时生效 |
 | `injectRepeatAfterTurns` | 3 | 同会话重复注入的轮次间隔，0 关闭 |
 | `autoLearnEnabled` | true | 完成轮次后后台提取有来源的可复用记忆 |
 | `autoLearnMaxItems` | 3 | 每轮最多学习的候选条数 |
 | `autoLearnTimeoutMs` | 30000 | 后台学习等待上限，单位毫秒 |
 | `recallReviewEnabled` | true | 自动注入前审核任务相关性 |
-| `recallReviewTimeoutMs` | 3000 | 召回审核等待上限，单位毫秒 |
+| `recallDiagnosticsEnabled` | true | 最近 20 次召回的阶段诊断，不改变候选和排序 |
+| `preferenceRecallEnabled` | false | 普通任务应用语言、详略和格式偏好 |
+| `outcomeRecallEnabled` | false | 按用户确认的实际结果补充情境激励与警示，要求开启反馈记录 |
+| `narrativeEnabled` | false | 管理面板按需生成反思草稿，经模型复核与用户确认保存独立版本 |
+| `narrativeTimeoutMs` | 15000 | 叙述生成与复核各自的调用时限，单位毫秒，最大 60000 |
+| `recallReviewTimeoutMs` | 15000 | 召回审核等待上限，单位毫秒，已有显式值继续生效 |
+| `recallReviewCacheSeconds` | 0 | 同会话审核缓存有效秒数，0 关闭，最多 300 秒、128 项 |
 | `recallCandidateBudget` | 12 | 审核前的直接候选数量，与最终注入预算分开 |
 | `injectMinScore` | 0.2 | 词与实体加权后的 BM25 候选门槛，不代表相关概率 |
 | `salientScoringEnabled` | false | 可选的原始情绪评分沉淀 |
@@ -246,6 +340,9 @@ sleep-memory/
 | `semanticRecallEnabled` | false | 语义扩展召回开关 |
 | `salientDecayHalfLifeDays` | 0 | 显著经历专用半衰期，0 关闭 |
 | `salientReviewAfterDays` | 0 | 显著经历复核期限，0 关闭 |
+
+离线标注集区分用户案例与构造用例，输出 `Precision@5`、`Recall@5`、误召回、漏召回、P50/P95 和输出 Token 估算。
+运行 `npm run eval -- --baseline-ref a74d6d9` 可与优化前版本对照，报告默认保存到 `tmp/evaluation-latest.json`；详见[验证指南](docs/guides/reliability.md#评测与消耗统计)。
 
 ---
 
@@ -259,10 +356,10 @@ sleep-memory/
 - 管理面板可查看整个个人 profile，不是多用户权限边界；`source.confirmed` 是调用者提供的溯源声明，不是权限凭据。
 - 不提供 dense 检索、多主机实时同步、自动事实冲突裁决或多用户鉴权。
 - 自主学习和审核依赖模型判断，逐字证据检查不等于语义蕴含证明；尚未给出真实 LLM 的准确率保证。
-  候选召回仍依赖词面或可选查询扩展，审核无法找回未进入候选集的记忆。
+  候选召回主要依赖词面、情境规则或可选查询扩展，审核无法找回未进入候选集的记忆。
   没有项目范围时只允许自主学习用户偏好，避免项目知识污染全局；项目知识需先建立工作区或会话绑定。
 - 存储没有跨记录事务；睡眠或导入发生 I/O 错误时可能部分完成，需核对错误与库存。
-- JSON 备份仅包含记忆与有效性，不含本机会话绑定、调度及配置；跨机器需要重新绑定项目。
+- v1 备份包含记忆，v2 增加睡眠审计，v3 增加用户反馈与结果历史，v4 增加叙述版本；均不含会话绑定、调度、学习任务及配置。
 
 ---
 

@@ -36,42 +36,50 @@ function createAnalysis() {
 }
 
 /** 相同词的原词与弱别名合并，保留最可靠的边界与有限词频。 */
-function addToken(analysis, type, value, weight, anchor = true, constraint) {
+function addToken(analysis, type, value, weight, anchor = true, constraint, count = 1) {
     if (!value) return
     const key = `${type}:${value}`
     const previous = analysis.tokens.get(key)
-    analysis.tokens.set(key, {
-        key, type, value, weight: Math.max(previous?.weight ?? 0, weight),
-        anchor: anchor || previous?.anchor === true, count: Math.min(8, (previous?.count ?? 0) + 1),
-    })
+    if (previous) {
+        previous.weight = Math.max(previous.weight, weight)
+        previous.anchor ||= anchor
+        previous.count = Math.min(8, previous.count + count)
+    }
+    if (!previous) analysis.tokens.set(key, { key, type, value, weight, anchor, count: Math.min(8, count) })
     if (constraint) {
         if (!analysis.constraints.has(constraint)) analysis.constraints.set(constraint, new Set())
         analysis.constraints.get(constraint).add(value)
     }
 }
 
-function addWord(analysis, word, weight = 1) {
+function addWord(analysis, word, weight = 1, count = 1) {
     const normalized = word.toLowerCase()
     if (STOP_WORDS.has(normalized)) return
     const generic = GENERIC_WORDS.has(normalized)
-    addToken(analysis, 'word', normalized, generic ? 0.15 : weight, !generic)
+    addToken(analysis, 'word', normalized, generic ? 0.15 : weight, !generic, undefined, count)
 }
 
 /** 中文使用词边界生成词与相邻短语；弱碎片只来自词内，不跨越词边界。 */
 function addChinese(analysis, text) {
+    // 同一字段片段内相同汉字段只分词一次，计数仍逐项累加并沿用上限。
+    const runs = new Map()
     for (const run of text.matchAll(/\p{Script=Han}+/gu)) {
-        const words = [...WORD_SEGMENTER.segment(run[0])].filter((item) => item.isWordLike).map((item) => item.segment)
+        runs.set(run[0], (runs.get(run[0]) ?? 0) + 1)
+    }
+    for (const [run, count] of runs) {
+        const words = []
+        for (const item of WORD_SEGMENTER.segment(run)) if (item.isWordLike) words.push(item.segment)
         for (let index = 0; index < words.length; index++) {
             const word = words[index]
             if (STOP_WORDS.has(word)) continue
-            addWord(analysis, word)
+            addWord(analysis, word, 1, count)
             // 显式单字查询可回查词内细节，自动注入不能只靠这些碎片成立。
             for (const char of word) {
-                if (!STOP_WORDS.has(char)) addToken(analysis, 'char', char, 0.08, false)
+                if (!STOP_WORDS.has(char)) addToken(analysis, 'char', char, 0.08, false, undefined, count)
             }
             if (word.length > 2) {
                 for (let offset = 0; offset < word.length - 1; offset++) {
-                    addToken(analysis, 'word', word.slice(offset, offset + 2), 0.12, false)
+                    addToken(analysis, 'word', word.slice(offset, offset + 2), 0.12, false, undefined, count)
                 }
             }
             if (GENERIC_WORDS.has(word)) continue
@@ -80,7 +88,7 @@ function addChinese(analysis, text) {
                 if (STOP_WORDS.has(words[next]) || GENERIC_WORDS.has(words[next])) break
                 phrase += words[next]
                 if (phrase.length > 10) break
-                addToken(analysis, 'word', phrase, 1.4)
+                addToken(analysis, 'word', phrase, 1.4, true, undefined, count)
             }
         }
     }
@@ -191,14 +199,12 @@ export function analyzeRetrievalText(text) {
 }
 
 /** 正文、标签和关键词分别分析，避免拼接字段制造不存在的短语或数字语境。 */
-function analyzeFields(fields) {
+export function analyzeFields(fields) {
     const analysis = createAnalysis()
     for (const field of fields) {
         const part = analyzeRetrievalText(field)
         for (const token of part.tokens.values()) {
-            for (let count = 0; count < token.count; count++) {
-                addToken(analysis, token.type, token.value, token.weight, token.anchor)
-            }
+            addToken(analysis, token.type, token.value, token.weight, token.anchor, undefined, token.count)
         }
         for (const [group, values] of part.constraints) {
             if (!analysis.constraints.has(group)) analysis.constraints.set(group, new Set())
@@ -214,7 +220,11 @@ export function retrievalTerms(text) {
 }
 
 export function buildRetrievalIndex(documents) {
-    const analyses = documents.map((fields) => analyzeFields(Array.isArray(fields) ? fields : [fields]))
+    return buildIndexFromAnalyses(documents.map((fields) => analyzeFields(Array.isArray(fields) ? fields : [fields])))
+}
+
+/** 只统计当前范围的词频，缓存分析结果不能令其他项目参与排序。 */
+export function buildIndexFromAnalyses(analyses) {
     const frequencies = new Map()
     const lengths = analyses.map((analysis) => {
         let length = 0
@@ -239,8 +249,15 @@ function conflictingEntities(query, document) {
 }
 
 /** 分层加权 BM25：完整实体优先，覆盖度参与排序，弱碎片不能独立通过自动召回。 */
-export function scoreRetrieval(index, queryText, { automatic = false } = {}) {
+export function scoreRetrieval(index, queryText, { automatic = false, local = false, minCoverage = 0 } = {}) {
     const query = analyzeRetrievalText(queryText)
+    if (local && (queryText.match(/\p{Script=Han}/gu)?.length ?? 0) > 1) {
+        const standalone = new Set([...queryText.matchAll(/(?:^|[^\p{Script=Han}])(\p{Script=Han})(?=的|是|为|[^\p{Script=Han}]|$)/gu)]
+            .map((match) => match[1]))
+        for (const [key, token] of query.tokens) {
+            if (token.type === 'word' && /^\p{Script=Han}$/u.test(token.value) && !standalone.has(token.value)) query.tokens.delete(key)
+        }
+    }
     const primary = [...query.tokens.values()].filter((token) => token.anchor)
     const totalWeight = primary.reduce((sum, token) => sum + token.weight, 0)
     return index.analyses.map((document, position) => {
@@ -266,7 +283,7 @@ export function scoreRetrieval(index, queryText, { automatic = false } = {}) {
             }
         }
         const coverage = totalWeight ? matchedWeight / totalWeight : 0
-        const eligible = conflicts.length === 0 && (!automatic || anchors > 0)
+        const eligible = conflicts.length === 0 && (!automatic || anchors > 0) && coverage >= minCoverage
         return {
             score: eligible ? score * (0.35 + 0.65 * coverage) : 0,
             eligible, conflicts,

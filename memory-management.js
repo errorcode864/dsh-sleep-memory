@@ -2,19 +2,26 @@ import {
     createMemoryId, createRecordView, exportMemoryBackup, getProjectId, matchesProject,
     planMemoryImport, validateMetadata, backupChecksum,
 } from './memory-contract.js'
+import { traceMemorySources } from './memory-provenance.js'
+import { outcomeMemoryVersion } from './memory-outcomes.js'
+import { createRecollection, recollectionVersion } from './memory-recollection.js'
 
-const EXTENDED_ACTIONS = ['get', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind']
+const EXTENDED_ACTIONS = ['get', 'recollect', 'traceSources', 'expandRecall', 'correct', 'export', 'import', 'status', 'setState', 'scope', 'bind', 'feedback', 'sleepHistory', 'sleepRecover', 'sleepRollback', 'sleepStats']
 
 export function isExtendedAction(action) {
     return EXTENDED_ACTIONS.includes(action)
 }
 
 /** 扩展管理请求独立校验，沿用既有工具的错误返回协议。 */
-export async function executeMemoryManagement(args, { table, cfg, parseRecord, status, manageScope }) {
+export async function executeMemoryManagement(args, { table, cfg, parseRecord, status, manageScope, feedback, trustedFeedback }) {
+    if (args.action === 'feedback') return feedback
+        ? feedback.submit(args, trustedFeedback, createRecordView([...table.entries()])) : { code: 'disabled', message: '反馈记录尚未开启' }
     const allowed = {
         get: ['action', 'id', 'projectId', 'offset', 'limit'],
-        correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt'],
-        export: ['action'],
+        recollect: ['action', 'id', 'projectId', 'detail', 'query', 'expectedVersion'],
+        traceSources: ['action', 'id', 'projectId', 'maxDepth', 'maxNodes', 'maxEstimatedTokens'],
+        correct: ['action', 'id', 'projectId', 'content', 'source', 'occurredAt', 'recallTriggers'],
+        export: ['action', 'includeAudit'],
         import: ['action', 'backup', 'dryRun'],
         status: ['action'],
         setState: ['action', 'id', 'projectId', 'state', 'reason', 'dryRun', 'planToken'],
@@ -27,7 +34,10 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     if (problems.length) return invalid(problems.join('；'))
     if (args.action === 'scope' || args.action === 'bind') return manageScope(args)
     if (args.action === 'status') return { action: 'status', ...await status() }
-    if (args.action === 'export') return { action: 'export', backup: exportMemoryBackup(table) }
+    if (args.action === 'export') {
+        if (args.includeAudit !== undefined && typeof args.includeAudit !== 'boolean') return invalid('includeAudit 必须为布尔值')
+        return { action: 'export', backup: exportMemoryBackup(table) }
+    }
     if (args.action === 'import') {
         if (args.dryRun !== undefined && typeof args.dryRun !== 'boolean') return invalid('dryRun 必须为布尔值')
         let plan
@@ -56,10 +66,33 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     }
     if (typeof args.id !== 'string' || !args.id) return invalid('必须提供记忆 ID')
     const record = table.get(args.id)
-    if (!record || !matchesProject(record, args.projectId, args.action === 'get')) {
+    if (!record || !matchesProject(record, args.projectId, ['get', 'recollect', 'traceSources'].includes(args.action))) {
         return { code: 'not_found', message: '指定范围内未找到这条记忆' }
     }
     const view = createRecordView([...table.entries()])
+    if (args.action === 'recollect') {
+        if ((args.detail !== undefined && !['brief', 'expanded', 'original'].includes(args.detail))
+            || (args.query !== undefined && (typeof args.query !== 'string' || args.query.length > 500))
+            || (args.expectedVersion !== undefined && (typeof args.expectedVersion !== 'string' || !/^[a-f0-9]{64}$/u.test(args.expectedVersion)))) {
+            return invalid('detail 必须为 brief、expanded 或 original；query 最多 500 字符，expectedVersion 必须为原文版本标识')
+        }
+        // 展开与对照须绑定同一底稿及有效状态以免混用历史和当前内容。
+        if (args.expectedVersion !== undefined && args.expectedVersion !== recollectionVersion(record, view)) {
+            return { code: 'conflict', message: '原文或有效状态已变化，请重新读取原文后生成回忆视图' }
+        }
+        return createRecollection(record, view, args)
+    }
+    if (args.action === 'traceSources') {
+        const limits = {
+            maxDepth: args.maxDepth === undefined ? 3 : args.maxDepth,
+            maxNodes: args.maxNodes === undefined ? 30 : args.maxNodes,
+            maxEstimatedTokens: args.maxEstimatedTokens === undefined ? 2000 : args.maxEstimatedTokens,
+        }
+        for (const [key, min, max] of [['maxDepth', 1, 8], ['maxNodes', 1, 100], ['maxEstimatedTokens', 300, 16000]]) {
+            if (!Number.isInteger(limits[key]) || limits[key] < min || limits[key] > max) return invalid(`${key} 必须为 ${min} 至 ${max} 的整数`)
+        }
+        return traceMemorySources(record, view, limits)
+    }
     const root = view.rootOf(record)
     const chain = [...view.byId.values()].filter((item) => view.rootOf(item).id === root.id)
     if (args.action === 'get') {
@@ -69,8 +102,17 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
             return invalid('来源分页要求 offset ≥ 0，limit 为 1 至 100 的整数')
         }
         const ids = record.edges.filter((edge) => edge.relation === 'consolidates').map((edge) => edge.target)
+        const revision = record.edges.find((edge) => edge.relation === 'revises')
         return {
             action: 'get', record, current: view.isCurrent(record), replacedBy: view.replacedBy.get(record.id) ?? null,
+            recollectionVersion: recollectionVersion(record, view),
+            narrativeEnabled: cfg.narrativeEnabled,
+            ...(feedback ? { outcomeEvidenceVersion: outcomeMemoryVersion(record, view.lifecycleOf(record)) } : {}),
+            ...(record.layer === 'deep' ? { summaryVersion: {
+                previousId: revision?.target ?? null, nextId: view.summaryReplacedBy.get(record.id) ?? null,
+                reason: revision?.reason ?? null,
+            } } : {}),
+            ...(feedback ? await feedback.detail(record, view.lifecycleOf(record), view.isCurrent(record), view) : {}),
             sources: ids.slice(offset, offset + limit).map((id) => table.get(id)).filter(Boolean),
             totalSources: ids.length, offset, limit,
             lifecycle: view.lifecycleOf(record), chainRoot: root.id,
@@ -123,7 +165,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
     if (record.layer === 'deep') return invalid('请先展开概要，纠正具体来源事实')
     if (table.size >= cfg.maxRecords) return { code: 'capacity_full', message: '容量不足，无法保留新旧两条事实' }
     const now = Date.now()
-    const { lifecycle, ...previous } = record
+    const { lifecycle, access, ...previous } = record
     const corrected = {
         ...previous, id: createMemoryId(), content: args.content.trim(), layer: 'surface',
         strength: 0.6, valence: null, arousal: null, accessCount: 0,
@@ -132,6 +174,7 @@ export async function executeMemoryManagement(args, { table, cfg, parseRecord, s
         supersededBy: null, gist: null, rewriteCount: 0, edges: [],
         replaces: record.id, projectId: getProjectId(record),
         source: args.source ?? { kind: 'unknown', confirmed: false },
+        ...(args.recallTriggers !== undefined ? { recallTriggers: args.recallTriggers } : {}),
     }
     parseRecord(corrected)
     await table.put(corrected.id, corrected)

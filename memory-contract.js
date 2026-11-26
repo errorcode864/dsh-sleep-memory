@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { validateRecallTriggers } from './memory-triggers.js'
+import { validateMemoryAccess } from './memory-access.js'
 
 /** 统一记忆 ID，消息 ID 不使用此约束。 */
 export function createMemoryId() {
@@ -23,7 +25,7 @@ export function getEventRange(record) {
 
 /** 扩展字段均为可选，旧格式不需要读时回写。 */
 export function validateMetadata(value) {
-    const problems = []
+    const problems = [...validateRecallTriggers(value.recallTriggers), ...validateMemoryAccess(value)]
     if (value.learning !== undefined) {
         const learning = value.learning
         if (!learning || typeof learning !== 'object' || Array.isArray(learning)
@@ -34,7 +36,7 @@ export function validateMetadata(value) {
             || !Array.isArray(learning.evidence) || learning.evidence.length < 1 || learning.evidence.length > 3
             || learning.evidence.some((evidence) => !evidence || typeof evidence.messageId !== 'string'
                 || !evidence.messageId || evidence.messageId.length > 200 || typeof evidence.quote !== 'string'
-                || evidence.quote.trim().length < 8 || evidence.quote.length > 500)) {
+                || evidence.quote.trim().length < 2 || evidence.quote.length > 500)) {
             problems.push('自动学习信息必须包含合法的类别、用途和原文证据')
         }
     }
@@ -98,6 +100,9 @@ export function createRecordView(entries) {
     for (const [id, record] of entries) {
         if (record.replaces && byId.has(record.replaces)) replacedBy.set(record.replaces, id)
     }
+    const summaryReplacedBy = new Map(entries.filter(([id, record]) => record.supersededBy
+        && byId.get(record.supersededBy)?.edges.some((edge) => edge.relation === 'revises' && edge.target === id))
+        .map(([id, record]) => [id, record.supersededBy]))
     // 整条纠正链共用根记录上的状态，一次持久写入即可切换，避免半条链生效。
     const rootOf = (record) => {
         const visited = new Set()
@@ -116,7 +121,7 @@ export function createRecordView(entries) {
         changed = false
         for (const [id, record] of entries) {
             if (!invalidSummaries.has(id) && record.edges.some((edge) => edge.relation === 'consolidates'
-                && (!byId.has(edge.target) || replacedBy.has(edge.target)
+                && (!byId.has(edge.target) || replacedBy.has(edge.target) || summaryReplacedBy.has(edge.target)
                     || invalidSummaries.has(edge.target) || lifecycleOf(byId.get(edge.target)).state !== 'active'))) {
                 invalidSummaries.add(id)
                 changed = true
@@ -124,12 +129,23 @@ export function createRecordView(entries) {
         }
     } while (changed)
     const isRecallable = (record, automatic = false) => !replacedBy.has(record.id)
+        && !summaryReplacedBy.has(record.id)
         && !invalidSummaries.has(record.id)
         && (lifecycleOf(record).state === 'active' || (!automatic && lifecycleOf(record).state === 'review'))
     const isCurrent = (record) => isRecallable(record, true)
-    const isConsolidated = (record) => record.supersededBy !== null
-        && (!byId.has(record.supersededBy) || isCurrent(byId.get(record.supersededBy)))
-    return { byId, replacedBy, invalidSummaries, isCurrent, isConsolidated, isRecallable, rootOf, lifecycleOf }
+    const isConsolidated = (record) => {
+        if (record.supersededBy === null) return false
+        const visited = new Set()
+        let parentId = record.supersededBy
+        while (summaryReplacedBy.has(parentId) && !visited.has(parentId)) {
+            visited.add(parentId)
+            parentId = summaryReplacedBy.get(parentId)
+        }
+        const parent = byId.get(parentId)
+        return !parent || (isCurrent(parent) && (parentId === record.supersededBy || record.layer === 'deep'
+            || parent.edges.some((edge) => edge.relation === 'consolidates' && edge.target === record.id)))
+    }
+    return { byId, replacedBy, summaryReplacedBy, invalidSummaries, isCurrent, isConsolidated, isRecallable, rootOf, lifecycleOf }
 }
 
 /** 规范化键顺序，使备份与重复导入不受 JSON 属性顺序影响。 */
@@ -211,8 +227,34 @@ export function planMemoryImport(table, backup, parseRecord, maxRecords) {
         if (record.supersededBy) {
             const parent = known.get(record.supersededBy)
             if (parent.layer !== 'deep'
-                || !parent.edges.some((edge) => edge.relation === 'consolidates' && edge.target === record.id)) {
+                || !parent.edges.some((edge) => ['consolidates', 'revises'].includes(edge.relation) && edge.target === record.id)) {
                 throw new Error(`巩固来源关系不完整：${record.id}`)
+            }
+        }
+        for (const edge of record.edges.filter((link) => link.relation === 'revises')) {
+            if (known.get(edge.target).layer !== 'deep' || known.get(edge.target).kind !== record.kind) {
+                throw new Error(`概要前序版本类型不一致：${record.id}`)
+            }
+            if (record.lifecycle?.state !== 'invalid' && known.get(edge.target).supersededBy !== record.id) {
+                throw new Error(`概要版本承接关系不完整：${record.id}`)
+            }
+        }
+    }
+    // 来源和版本只能指向历史节点以防循环概要进入后续睡眠。
+    const visited = new Set()
+    const visiting = new Set()
+    const stack = []
+    for (const record of known.values()) {
+        stack.push({ id: record.id, exit: false })
+        while (stack.length) {
+            const item = stack.pop()
+            if (item.exit) { visiting.delete(item.id); visited.add(item.id); continue }
+            if (visiting.has(item.id)) throw new Error('概要来源或版本关系存在循环')
+            if (visited.has(item.id)) continue
+            visiting.add(item.id)
+            stack.push({ id: item.id, exit: true })
+            for (const edge of known.get(item.id).edges) {
+                if (['consolidates', 'revises'].includes(edge.relation)) stack.push({ id: edge.target, exit: false })
             }
         }
     }

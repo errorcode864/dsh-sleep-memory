@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
     const REMOTE_SERVICE = 'sleepMemoryApi';
     const REMOTE_NAMESPACE = 'sleepMemoryApi';
     const NOARG_METHODS = new Set(['stats', 'edges', 'getConfig', 'status']);
-    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope'];
+    const REMOTE_METHODS = ['stats', 'list', 'edges', 'runSleep', 'getConfig', 'setConfig', 'status', 'getRecord', 'manage', 'scope', 'backupTransfer'];
     const INPUT_CODEC = Object.freeze({
       mode: 'strict',
       typeSymbol: Symbol('sleepMemoryApi.input'),
@@ -786,6 +786,7 @@ window.__ModuleLoader__.load({
               }, '查看原文与来源')),
             h('div', { className: 'sm-rowhead' },
               h(LayerBadge, { layer: item.layer }),
+              item.access?.state === 'dormant' ? h('span', { className: 'sm-badge' }, '休眠') : null,
               h('span', { className: 'sm-badge' }, kindLabel),
               salient ? h('span', {
                 className: `sm-badge ${Number(item.valence) >= 0 ? 'is-salient-pos' : 'is-salient-neg'}`,
@@ -818,8 +819,15 @@ window.__ModuleLoader__.load({
                     h('div', null, h('dt', null, '记忆 ID'), h('dd', null, detail.record.id)),
                     h('div', null, h('dt', null, '范围'), h('dd', null, detail.record.projectId ?? '全局')),
                     h('div', null, h('dt', null, '有效性'), h('dd', null, `${STATE_LABELS[detail.lifecycle.state]}${detail.lifecycle.reason ? ` · ${detail.lifecycle.reason}` : ''}`)),
-                    h('div', null, h('dt', null, '自动召回'), h('dd', null, detail.current ? '参与' : '未参与'))),
+                    h('div', null, h('dt', null, '自动召回'), h('dd', null, detail.current
+                      ? detail.record.access?.state === 'dormant' ? '休眠标记；开启休眠时需情境或关联路径' : '参与' : '未参与')),
+                    detail.record.access ? h('div', null, h('dt', null, '可访问状态'), h('dd', null,
+                      `${detail.record.access.state === 'dormant' ? '休眠' : '已唤醒'} · ${detail.record.access.reason} · ${formatRuntimeTime(detail.record.access.at)}`)) : null,
+                    detail.record.access?.lastWake ? h('div', null, h('dt', null, '最近唤醒'), h('dd', null,
+                      `${formatRuntimeTime(detail.record.access.lastWake.at)} · ${detail.record.access.lastWake.via === 'context' ? '情境条件' : `关联 ${detail.record.access.lastWake.fromId} · ${detail.record.access.lastWake.hops} 跳`}`)) : null),
                   detail.replacedBy ? h('p', { className: 'sm-runtime-note' }, `替代记忆：${detail.replacedBy}`) : null),
+                h(RecollectionPanel, { key: detail.recollectionVersion, detail, onRefresh: () => void loadDetail() }),
+                h(NarrativePanel, { key: `narrative-${detail.recollectionVersion}`, detail }),
                 h('section', { className: 'sm-record-section', 'aria-label': '来源信息' },
                   h('h3', null, '来源信息'),
                   h('dl', { className: 'sm-runtime-info' },
@@ -834,11 +842,13 @@ window.__ModuleLoader__.load({
                     ...detail.chain.map((record) => h('div', { className: 'sm-record-history', key: record.id },
                       h('code', null, record.id), h('p', { className: 'sm-record-original' }, record.content)))) : null,
                   h(RecordEditor, { detail, onChanged: () => { void loadDetail(); onChanged?.(); } })),
+                detail.feedbackEnabled ? h(FeedbackPanel, { detail, onChanged: () => void loadDetail() }) : null,
                 h('section', { className: 'sm-record-section', 'aria-label': '来源记录' },
                   h('h3', null, `来源记录 · ${detail.totalSources} 条`),
                   detail.totalSources === 0 ? h('p', { className: 'sm-runtime-note' }, '没有关联来源记录。') : null,
                   ...detail.sources.map((source) => h('div', { className: 'sm-record-history', key: source.id },
                     h('code', null, source.id), h('p', { className: 'sm-record-original' }, source.content)))),
+                h(SourceTracePanel, { rootId: detail.record.id, projectId: detail.record.projectId ?? null, summaryVersion: detail.summaryVersion }),
                 h('div', { className: 'sm-record-pagination' },
                   detail.offset > 0 ? h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: detailBusy, onClick: () => void loadDetail(Math.max(0, detail.offset - 5)) }, '上一页来源') : null,
                   detail.offset + detail.limit < Math.max(detail.totalSources, detail.totalChain)
@@ -849,6 +859,309 @@ window.__ModuleLoader__.load({
         const SCOPE_LABELS = { explicit: '显式指定', session: '会话绑定', workspace: '工作区', config: '插件配置', global: '全局回退' };
         const SOURCE_LABELS = { user: '用户', model: '模型推断', tool: '工具', import: '导入', unknown: '未记录' };
         const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+        const MAX_LARGE_BACKUP_BYTES = 160 * 1024 * 1024;
+
+        /** 视图与底稿绑定同一版本，展开只读取而不强化记忆。 */
+        function RecollectionPanel({ detail, onRefresh }) {
+            const [recollection, setRecollection] = useState(null);
+            const [query, setQuery] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const read = async (level) => {
+                setBusy(true);
+                setError('');
+                setRecollection(null);
+                try {
+                    setRecollection(await call('manage', {
+                        action: 'recollect', id: detail.record.id, projectId: detail.record.projectId ?? null,
+                        detail: level, query, expectedVersion: detail.recollectionVersion,
+                    }));
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '回忆视图与原文对照' },
+                h('h3', null, '回忆视图与原文对照'),
+                h('p', { className: 'sm-runtime-note' }, '按年龄收缩经历的展示细节；事实、偏好和显著记忆保持完整，原文不会被改写。'),
+                h('label', null, '回忆线索', h('input', { type: 'text', value: query, maxLength: 500,
+                    disabled: busy, 'aria-label': '回忆线索', onChange: (event) => { setQuery(event.target.value); setRecollection(null); } })),
+                ...[['brief', '生成简略回忆'], ['expanded', '展开更多细节'], ['original', '显示完整底稿']].map(([level, label]) =>
+                    h('button', { key: level, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void read(level) }, label)),
+                busy ? h('p', { role: 'status' }, '正在读取回忆视图…') : null,
+                error ? h('div', { className: 'sm-runtime-error', role: 'alert' }, h('p', null, error),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-outline', onClick: onRefresh }, '刷新底稿后重试')) : null,
+                recollection ? h('div', null,
+                    h('p', null, `事件距今 ${recollection.ageDays} 天 · 保留 ${recollection.includedChars} 字符 · 省略 ${recollection.omittedChars} 字符`),
+                    !recollection.current ? h('p', { role: 'status' }, '此记录为历史版本或已不参与当前召回。') : null,
+                    h('p', { className: 'sm-record-original', 'aria-label': '回忆片段' }, recollection.content || '预算内没有可完整呈现的句段，请展开或读取完整底稿。'),
+                    h('p', { className: 'sm-runtime-note' }, recollection.note),
+                    h('p', null, `视图格式 v${recollection.formatVersion} · 底稿 ${recollection.sourceVersion.slice(0, 12)} · 视图 ${recollection.viewVersion.slice(0, 12)}`),
+                    h('details', null,
+                        h('summary', null, '对照原文与省略范围'),
+                        h('p', null, '标亮部分为已呈现片段，其余为省略内容；位置使用 UTF-16 下标且末端不包含。'),
+                        h('p', { className: 'sm-record-original', 'aria-label': '回忆原文对照' },
+                            ...[...recollection.fragments.map((fragment) => ({ ...fragment, included: true })),
+                                ...recollection.omitted.map((range) => ({ ...range, included: false }))]
+                                .sort((a, b) => a.start - b.start).map((range) =>
+                                    h(range.included ? 'mark' : 'span', { key: range.start,
+                                        title: `${range.included ? '呈现' : '省略'} [${range.start}, ${range.end})` },
+                                    detail.record.content.slice(range.start, range.end)))),
+                        recollection.omitted.length ? h('p', null, `省略范围：${recollection.omitted.map((range) => `[${range.start}, ${range.end})`).join('、')}`) : h('p', null, '没有省略内容。'))) : null);
+        }
+
+        /** 反思草稿须用户核对后保存，已撤回版本仍保留历史。 */
+        function NarrativePanel({ detail }) {
+            const [form, setForm] = useState({ provider: '', model: '', style: 'reflective' });
+            const [draft, setDraft] = useState(null);
+            const [history, setHistory] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const requestId = useRef(null);
+            const eligible = detail.narrativeEnabled && detail.current && detail.record.kind === 'experience'
+                && detail.record.layer !== 'deep' && detail.record.learning?.category !== 'preference';
+            const readHistory = (offset = 0) => call('manage', {
+                action: 'narrativeHistory', id: detail.record.id, projectId: detail.record.projectId ?? null, offset, limit: 5,
+            });
+            const act = async (action, extra = {}) => {
+                setBusy(true);
+                setError('');
+                try {
+                    if (action === 'narrativeHistory') {
+                        setHistory(await readHistory(extra.offset ?? 0));
+                        return;
+                    }
+                    if (action === 'narrativeDraft' && !requestId.current) requestId.current = crypto.randomUUID();
+                    const result = await call('manage', {
+                        action, id: detail.record.id, projectId: detail.record.projectId ?? null,
+                        ...(action === 'narrativeDraft' ? { ...form, requestId: requestId.current, expectedVersion: detail.recollectionVersion } : extra),
+                    });
+                    if (action === 'narrativeDraft' && result.entry) {
+                        setDraft(result);
+                        return;
+                    }
+                    setDraft(null);
+                    requestId.current = null;
+                    setHistory(await readHistory());
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            const change = (key, value) => {
+                setForm((current) => ({ ...current, [key]: value }));
+                setDraft(null);
+                requestId.current = null;
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '可选叙述实验' },
+                h('h3', null, '可选叙述实验'),
+                h('p', { className: 'sm-runtime-note' }, '反思是模型推断；原文保持完整，确认保存不代表反思已成为事实。'),
+                eligible ? h('div', null,
+                    ...[['provider', '叙述模型服务 ID'], ['model', '叙述模型 ID']].map(([key, label]) =>
+                        h('label', { key }, label, h('input', { type: 'text', 'aria-label': label, value: form[key], maxLength: 200,
+                            disabled: busy, onChange: (event) => change(key, event.target.value) }))),
+                    h('p', { className: 'sm-runtime-note' }, '使用宿主已配置的模型服务与模型 ID；生成会将此条完整底稿发送给所选模型。'),
+                    h('label', null, '叙述风格', h('select', { 'aria-label': '叙述风格', value: form.style, disabled: busy,
+                        onChange: (event) => change('style', event.target.value) },
+                    h('option', { value: 'reflective' }, '平实反思'), h('option', { value: 'gentle' }, '温和反思'))),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy || !form.provider.trim() || !form.model.trim(),
+                        onClick: () => void act('narrativeDraft') }, '生成反思草稿（2 次模型调用）')) :
+                    h('p', { className: 'sm-runtime-note' }, detail.narrativeEnabled ? '仅当前原始经历可生成反思。' : '叙述实验未开启，可在插件配置页启用。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void act('narrativeHistory') }, '读取叙述历史'),
+                busy ? h('p', { role: 'status' }, '正在处理叙述…') : null,
+                error ? h('p', { className: 'sm-runtime-error', role: 'alert' }, error) : null,
+                draft ? h('div', { 'aria-label': '待确认叙述草稿' },
+                    h('p', null, '待确认草稿 · 模型推断 · 15 分钟内可保存'),
+                    ...draft.entry.reflections.map((item, index) => h('div', { key: index },
+                        h('blockquote', { className: 'sm-record-original' }, `原文：${item.quote}`), h('p', null, `反思：${item.text}`))),
+                    h('p', null, `模型复核：${draft.entry.reviewReason}`),
+                    h('button', { type: 'button', className: 'sm-btn', disabled: busy || !eligible,
+                        onClick: () => void act('narrativeConfirm', { draftId: draft.entry.id }) }, '核对原文后保存反思'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                        onClick: () => { setDraft(null); requestId.current = null; } }, '放弃此草稿')) : null,
+                history ? h('div', null,
+                    h('p', null, `叙述历史 · ${history.total} 个版本；请在备份恢复中下载含叙述历史的 v4 备份。`),
+                    ...history.items.map((entry) => h('div', { key: entry.id, className: 'sm-record-history' },
+                        h('p', null, `${formatRuntimeTime(entry.createdAt)} · ${entry.style === 'gentle' ? '温和反思' : '平实反思'} · 模型推断 · ${entry.state === 'retracted' ? '已撤回' : entry.applicable ? '与当前底稿一致' : '底稿已变化或不可用'}`),
+                        h('code', null, entry.id),
+                        entry.previousId ? h('p', null, `上一叙述版本：${entry.previousId}`) : null,
+                        ...entry.reflections.map((item, index) => h('div', { key: index },
+                            h('blockquote', { className: 'sm-record-original' }, `原文引文：${item.quote}`), h('p', null, `反思：${item.text}`))),
+                        entry.state === 'confirmed' ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void act('narrativeRetract', { versionId: entry.id }) }, '撤回此叙述版本') : null)),
+                    history.offset > 0 ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void act('narrativeHistory', { offset: Math.max(0, history.offset - 5) }) }, '上一页叙述') : null,
+                    history.offset + history.limit < history.total ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void act('narrativeHistory', { offset: history.offset + 5 }) }, '下一页叙述') : null) : null);
+        }
+
+        /** 多层追溯按需读取且原文展开沿用同一项目范围。 */
+        function SourceTracePanel({ rootId, projectId, summaryVersion }) {
+            const [trace, setTrace] = useState(null);
+            const [original, setOriginal] = useState(null);
+            const [maxDepth, setMaxDepth] = useState(3);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const read = async (action, id) => {
+                setBusy(true);
+                setError('');
+                setOriginal(null);
+                try {
+                    const result = await call('manage', {
+                        action, id, projectId,
+                        ...(action === 'traceSources' ? { maxDepth, maxNodes: 30, maxEstimatedTokens: 3000 } : {}),
+                    });
+                    if (action === 'traceSources') setTrace(result);
+                    if (action === 'get') setOriginal(result);
+                } catch (failure) {
+                    setError(String(failure.message ?? failure));
+                } finally {
+                    setBusy(false);
+                }
+            };
+            return h('section', { className: 'sm-record-section', 'aria-label': '多层来源追溯' },
+                h('h3', null, '多层来源追溯'),
+                summaryVersion?.reason ? h('p', null, `概要版本依据：${summaryVersion.reason}`) : null,
+                ...[['previousId', '读取上一版概要'], ['nextId', '读取下一版概要']].filter(([key]) => summaryVersion?.[key]).map(([key, label]) =>
+                    h('button', { key, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                        onClick: () => void read('get', summaryVersion[key]) }, label)),
+                h('label', null, '展开深度', h('select', {
+                    'aria-label': '来源展开深度', value: maxDepth, disabled: busy,
+                    onChange: (event) => setMaxDepth(Number(event.target.value)),
+                }, ...[1, 3, 5, 8].map((depth) => h('option', { key: depth, value: depth }, `${depth} 层`)))),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void read('traceSources', rootId) }, '展开多层来源'),
+                busy ? h('p', { role: 'status' }, '正在读取来源…') : null,
+                error ? h('p', { className: 'sm-runtime-error', role: 'alert' }, error) : null,
+                trace ? h('div', null,
+                    h('p', null, `起点 ${trace.rootId} · ${trace.complete ? '遍历完整' : '部分展开'} · ${trace.items.length} 条 · 估算 ${trace.estimatedTokens} Token`),
+                    h('p', { className: 'sm-runtime-note' }, '预览最多 300 字符；完整原文需单独读取，读取不会强化或唤醒记忆。'),
+                    h('p', null, Object.entries(trace.stopped).filter(([, count]) => count > 0).map(([reason, count]) =>
+                        `${{ cycle: '循环引用', duplicate: '重复来源', missing: '来源缺失', scope: '范围不符', depth: '深度上限', nodes: '条数上限', tokens: 'Token 预算', edges: '遍历上限' }[reason]} ${count}`).join('；')),
+                    ...trace.items.map((item) => h('div', { className: 'sm-record-history', key: item.id },
+                        h('code', null, item.path.join(' → ')),
+                        h('p', null, `${item.leaf ? '末端来源' : '含下层来源'} · ${STATE_LABELS[item.state]}${item.current ? '' : ' · 历史或无效版本'}${item.accessState === 'dormant' ? ' · 休眠' : ''}`),
+                        h('p', { className: 'sm-record-original' }, `${item.content}${item.truncated ? '…（预览已截断）' : ''}`),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            'aria-label': `读取来源原文 ${item.id}`, onClick: () => void read('get', item.id) }, '读取来源原文'),
+                        !item.leaf ? h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            'aria-label': `继续追溯 ${item.id}`, onClick: () => void read('traceSources', item.id) }, '从此记录继续追溯') : null))) : null,
+                original ? h('div', { className: 'sm-record-history', 'aria-label': '来源完整原文' },
+                    h('code', null, original.record.id), h('p', { className: 'sm-record-original' }, original.record.content),
+                    original.summaryVersion?.reason ? h('p', null, original.summaryVersion.reason) : null,
+                    ...[['previousId', '继续读取上一版'], ['nextId', '继续读取下一版']].filter(([key]) => original.summaryVersion?.[key]).map(([key, label]) =>
+                        h('button', { key, type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void read('get', original.summaryVersion[key]) }, label)),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                        onClick: () => void read('traceSources', original.record.id) }, '追溯此版本来源')) : null);
+        }
+
+        /** 反馈绑定实际呈现的版本，事实状态仍由管理入口核对后修改。 */
+        function FeedbackPanel({ detail, onChanged }) {
+          const [busy, setBusy] = useState(false);
+          const [message, setMessage] = useState('');
+          const labels = { helpful: '有用', irrelevant: '无关', incorrect: '错误', outdated: '过时' };
+          const submit = async (exposure, signal) => {
+            setBusy(true); setMessage('');
+            try {
+              await call('manage', {
+                action: 'feedback', eventId: crypto.randomUUID(), exposureId: exposure.id, signal,
+                ...(signal === 'retract' ? { retracts: exposure.feedback.eventId } : {}),
+              });
+              setMessage(signal === 'retract' ? '已撤回反馈。' : '已记录反馈。'); onChanged();
+            } catch (error) {
+              setMessage(`反馈失败：${error.message}`);
+            } finally { setBusy(false); }
+          };
+          return h('section', { className: 'sm-record-section', 'aria-label': '召回反馈' },
+            h('h3', null, '召回反馈'),
+            h('p', { className: 'sm-runtime-note' }, '仅对实际呈现记录反馈；错误或过时内容请在上方管理中核对。'),
+            detail.exposures.length ? detail.exposures.map((exposure) => h('div', { className: 'sm-record-history', key: exposure.id },
+              h('p', null, `${relTime(exposure.at)} · ${exposure.projectId ?? '全局'} · ${exposure.mode === 'automatic' ? '自动注入' : '主动召回'}${exposure.currentVersion ? '' : ' · 历史版本'}`),
+              exposure.feedback ? h('p', { role: 'status' }, `反馈：${labels[exposure.feedback.signal]}`) : null,
+              h('div', { className: 'sm-rowtags' }, Object.entries(labels).map(([signal, label]) => h('button', {
+                key: signal, type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                onClick: () => void submit(exposure, signal),
+              }, label)),
+              exposure.feedback ? h('button', {
+                type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                onClick: () => void submit(exposure, 'retract'),
+              }, '撤回反馈') : null)))
+              : h('p', { className: 'sm-runtime-note' }, '暂无实际呈现记录。'),
+            h(OutcomePanel, { detail, onChanged }),
+            message ? h('p', { role: 'status' }, message) : null);
+        }
+
+        /** 用户核对原文后才能记录实际结果且撤回保留历史。 */
+        function OutcomePanel({ detail, onChanged }) {
+            const [exposureId, setExposureId] = useState(detail.exposures.find((item) => item.currentVersion)?.id ?? '');
+            const [signal, setSignal] = useState('success');
+            const [draft, setDraft] = useState({ when: '', cues: '', action: '', result: '', evidenceId: detail.record.id, quote: '' });
+            const [proof, setProof] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const run = async (action, event) => {
+                setBusy(true); setMessage('');
+                try {
+                    if (action === 'read') {
+                        const result = await call('manage', { action: 'get', id: draft.evidenceId, projectId: detail.record.projectId ?? null });
+                        setProof(result);
+                        setDraft((current) => ({ ...current, quote: result.record.content.slice(0, 500) }));
+                        return;
+                    }
+                    await call('manage', {
+                        action: 'feedback', eventId: crypto.randomUUID(),
+                        exposureId: event?.exposureId ?? exposureId, signal: action === 'retract' ? 'retract' : signal,
+                        ...(action === 'retract' ? { retracts: event.eventId } : { outcome: {
+                            trigger: { when: draft.when, cues: draft.cues.split(/[，,\n]/).map((cue) => cue.trim()).filter(Boolean) },
+                            action: draft.action, result: draft.result,
+                            evidence: { memoryId: draft.evidenceId, quote: draft.quote, version: proof.outcomeEvidenceVersion },
+                        } }),
+                    });
+                    setMessage(action === 'retract' ? '已撤回结果反馈。' : '已保存用户确认的实际结果。');
+                    onChanged();
+                } catch (error) { setMessage(`结果操作失败：${error.message}`); }
+                finally { setBusy(false); }
+            };
+            return h('details', { className: 'sm-management', 'aria-label': '实际结果与证据' },
+                h('summary', null, '实际结果与证据'),
+                h('p', null, '只确认已核对的实际结果；情绪分数、重复召回和模型自评不能代替结果证据。'),
+                h('label', null, '结果对应的呈现', h('select', {
+                    'aria-label': '结果对应的呈现', value: exposureId, disabled: busy,
+                    onChange: (event) => setExposureId(event.target.value),
+                }, h('option', { value: '' }, '选择当前版本的呈现'),
+                ...detail.exposures.filter((item) => item.currentVersion).map((item) =>
+                    h('option', { key: item.id, value: item.id }, `${formatRuntimeTime(item.at)} · ${item.projectId ?? '全局'}`)))),
+                h('label', null, '实际结果方向', h('select', {
+                    'aria-label': '实际结果方向', value: signal, disabled: busy, onChange: (event) => setSignal(event.target.value),
+                }, h('option', { value: 'success' }, '成功'), h('option', { value: 'failure' }, '失败'))),
+                ...[['when', '适用情境', 200], ['cues', '情境线索', 648], ['action', '采用的做法', 200],
+                    ['result', '实际结果', 300], ['evidenceId', '结果证据 ID', 200], ['quote', '证据原文引句', 500]].map(([key, label, maxLength]) =>
+                    h('label', { key }, label, h('textarea', {
+                        'aria-label': label, className: 'sm-search', rows: key === 'quote' ? 3 : 1,
+                        value: draft[key], maxLength, disabled: busy,
+                        onChange: (event) => { setDraft((current) => ({ ...current, [key]: event.target.value })); if (key === 'evidenceId') setProof(null); },
+                    }))),
+                h('p', { className: 'sm-runtime-note' }, '情境线索使用逗号分隔的具体短语；证据应为同项目的原始记录。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy || !draft.evidenceId,
+                    onClick: () => void run('read') }, '读取结果证据'),
+                proof ? h('p', { className: 'sm-record-original' }, proof.record.content) : null,
+                h('button', { type: 'button', className: 'sm-btn sm-btn-primary',
+                    disabled: busy || !proof || !exposureId || !draft.when || !draft.cues || !draft.action || !draft.result || !draft.quote,
+                    onClick: () => void run('submit') }, '确认实际结果'),
+                ...detail.exposures.flatMap((exposure) => (exposure.outcomes ?? []).map((event) =>
+                    h('div', { key: event.eventId, className: 'sm-record-history' },
+                        h('p', null, `${event.signal === 'success' ? '成功' : '失败'} · ${event.applicable ? '证据有效' : '历史版本或证据已变化'}`),
+                        h('p', null, `${event.outcome.trigger.when} · ${event.outcome.action} · ${event.outcome.result}`),
+                        h('p', null, `${event.outcome.evidence.memoryId}：「${event.outcome.evidence.quote}」`),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void run('retract', event) }, '撤回结果反馈')))),
+                message ? h('p', { role: 'status' }, message) : null);
+        }
 
         /** 纠正前展示新旧正文，状态变更必须先取得服务端影响计划。 */
         function RecordEditor({ detail, onChanged }) {
@@ -963,28 +1276,50 @@ window.__ModuleLoader__.load({
         /** 文件在浏览器中选择与下载；导入持有同一份预演快照，修改文件后必须重新预演。 */
         function BackupPanel({ onChanged }) {
             const [backup, setBackup] = useState(null);
+            const [largeFile, setLargeFile] = useState(null);
             const [plan, setPlan] = useState(null);
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState('');
+            const [progress, setProgress] = useState('');
             const selection = useRef(0);
             const choose = async (event) => {
                 const revision = ++selection.current;
-                setBackup(null); setPlan(null); setMessage('');
+                setBackup(null); setLargeFile(null); setPlan(null); setMessage('');
                 const file = event.target.files?.[0];
                 if (!file) return;
                 try {
-                    if (!file.name.toLowerCase().endsWith('.json') || file.size > MAX_BACKUP_BYTES) {
-                        throw new Error('请选择不超过 10 MiB 的 JSON 备份文件');
+                    if (!file.name.toLowerCase().endsWith('.json') || file.size > MAX_LARGE_BACKUP_BYTES) {
+                        throw new Error('请选择不超过 160 MiB 的 JSON 备份文件');
+                    }
+                    if (file.size > MAX_BACKUP_BYTES) {
+                        setLargeFile(file);
+                        return;
                     }
                     const value = JSON.parse(await file.text());
                     if (revision === selection.current) setBackup(value);
                 } catch (error) { if (revision === selection.current) setMessage(`文件读取失败：${error.message}`); }
             };
-            const run = async (action, dryRun = true) => {
+            const previewLargeFile = async (file) => {
+                setProgress('正在上传备份：0%');
+                const { transferId, chunkBytes } = await call('backupTransfer', { action: 'start', bytes: file.size });
+                for (let offset = 0; offset < file.size; offset += chunkBytes) {
+                    const bytes = new Uint8Array(await file.slice(offset, offset + chunkBytes).arrayBuffer());
+                    let binary = '';
+                    for (let start = 0; start < bytes.length; start += 8192) {
+                        binary += String.fromCharCode(...bytes.subarray(start, start + 8192));
+                    }
+                    const { received } = await call('backupTransfer', { action: 'append', transferId, offset, data: btoa(binary) });
+                    setProgress(`正在上传备份：${Math.floor(received * 100 / file.size)}%`);
+                }
+                setProgress('正在校验备份并生成预演');
+                return { ...await call('backupTransfer', { action: 'preview', transferId }), transferId };
+            };
+            const run = async (action, dryRun = true, includeAudit = false, includeFeedback = false, includeNarratives = false) => {
                 setBusy(true); setMessage('');
                 try {
                     if (action === 'export') {
-                        const result = await call('manage', { action });
+                        const result = await call('manage', { action, ...(includeAudit ? { includeAudit: true } : {}),
+                            ...(includeFeedback ? { includeFeedback: true } : {}), ...(includeNarratives ? { includeNarratives: true } : {}) });
                         const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json;charset=utf-8' });
                         if (blob.size > MAX_BACKUP_BYTES) throw new Error('备份超过界面 10 MiB 限制，请使用管理工具导出');
                         const url = URL.createObjectURL(blob);
@@ -992,25 +1327,109 @@ window.__ModuleLoader__.load({
                         link.href = url; link.download = `sleep-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
                         link.click();
                         setTimeout(() => URL.revokeObjectURL(url), 1000);
-                        setMessage('已生成备份下载，包含历史原文及来源。');
-                    } else {
-                        const result = await call('manage', { action, backup, dryRun });
-                        if (dryRun) setPlan(result);
-                        else { setPlan(null); setMessage(`导入完成：新增 ${result.imported} 条，跳过 ${result.skipped} 条。`); onChanged?.(); }
+                        setMessage(includeNarratives ? '已生成包含叙述版本与撤回状态的 v4 备份。' : includeFeedback ? '已生成记忆、审计与用户反馈备份。' : includeAudit ? '已生成记忆与睡眠审计备份。' : '已生成备份下载，包含历史原文及来源。');
+                        return;
                     }
+                    setPlan(null);
+                    if (!dryRun) setProgress('正在恢复备份');
+                    const result = largeFile
+                        ? dryRun ? await previewLargeFile(largeFile)
+                            : await call('backupTransfer', { action: 'confirm', transferId: plan.transferId, planToken: plan.planToken })
+                        : await call('manage', {
+                            action, backup, dryRun, ...(!dryRun && [2, 3, 4].includes(backup.version) ? { planToken: plan.planToken } : {}),
+                        });
+                    if (dryRun) { setPlan(result); return; }
+                    setMessage(`导入完成：新增 ${result.imported} 条记忆、${result.importedAudits ?? 0} 个审计批次、${result.importedFeedback ?? 0} 条呈现与反馈、${result.importedNarratives ?? 0} 个叙述版本。`);
+                    onChanged?.();
                 } catch (error) {
-                    setPlan(null); setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
-                } finally { setBusy(false); }
+                    setMessage(`操作失败：${error.message}。导入中断时请保留原文件，重新预演后重试。`);
+                } finally { setBusy(false); setProgress(''); }
             };
             return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '备份与恢复' },
                 h('h3', null, '备份与恢复'),
                 h('p', null, '备份包含全库历史与来源。导入先预演；同 ID 异内容会拒绝，发生 I/O 中断可用原文件重试。'),
                 h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export') }, '下载 JSON 备份'),
-                h('label', null, '选择备份文件（最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
-                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || !backup, onClick: () => void run('import') }, '预演导入'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true) }, '下载记忆与审计备份'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true) }, '下载含用户反馈的备份'),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy, onClick: () => void run('export', true, true, true, true) }, '下载含叙述历史的备份'),
+                h('p', null, 'v3 备份包含结果与撤回历史；会话绑定、调度和学习任务仍不包含在内。'),
+                h('p', null, 'v4 额外包含已保存的叙述版本；未确认草稿与模型配置不在备份中。'),
+                h('label', null, '选择备份文件（v4 最大 160 MiB，旧版最大 10 MiB）', h('input', { type: 'file', accept: '.json,application/json', disabled: busy, onChange: choose })),
+                h('button', { className: 'sm-btn sm-btn-outline', type: 'button', disabled: busy || (!backup && !largeFile), onClick: () => run('import') }, '预演导入'),
+                progress ? h('p', { role: 'status' }, progress) : null,
                 plan ? h('div', { role: 'status' },
-                    h('p', null, `将新增 ${plan.planned} 条，跳过 ${plan.skipped} 条。`),
-                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => void run('import', false) }, '确认导入')) : null,
+                    h('p', null, `将新增 ${plan.planned} 条记忆、${plan.plannedAudits ?? 0} 个审计批次、${plan.plannedFeedback ?? 0} 条呈现与反馈、${plan.plannedNarratives ?? 0} 个叙述版本，跳过 ${plan.skipped} 条记忆和 ${plan.skippedNarratives ?? 0} 个叙述版本。`),
+                    h('button', { className: 'sm-btn sm-btn-primary', type: 'button', disabled: busy, onClick: () => run('import', false) }, '确认导入')) : null,
+                message ? h('p', { role: 'status' }, message) : null);
+        }
+
+        /** 睡眠历史按批次预演回滚并保留修改证据。 */
+        function SleepAuditPanel({ onChanged }) {
+            const [history, setHistory] = useState(null);
+            const [detail, setDetail] = useState(null);
+            const [plan, setPlan] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState('');
+            const [stats, setStats] = useState(null);
+            const run = async (input) => {
+                setBusy(true); setMessage(''); setPlan(null);
+                try {
+                    const result = await call('manage', input);
+                    if (input.action === 'sleepStats') { setStats(result); return; }
+                    if (input.action === 'sleepHistory') {
+                        if (input.batchId) setDetail(result);
+                        if (!input.batchId) { setHistory(result); setDetail(null); }
+                        return;
+                    }
+                    if (input.action === 'sleepRollback' && result.dryRun) {
+                        setPlan(result);
+                        return;
+                    }
+                    setMessage(input.action === 'sleepRecover' ? `恢复完成：${result.recovered} 个批次。` : '回滚完成，已恢复批次前的记忆状态。');
+                    setDetail(null);
+                    setHistory(await call('manage', { action: 'sleepHistory', limit: 10 }));
+                    onChanged?.();
+                } catch (error) {
+                    setMessage(`操作失败：${error.message}`);
+                } finally { setBusy(false); }
+            };
+            return h('section', { className: 'sm-management sm-manager-section', 'aria-label': '睡眠审计' },
+                h('h3', null, '睡眠审计'),
+                h('p', null, '开启睡眠审计后保留每批修改证据并暂停物理遗忘；回滚需先预演，后续修改会阻止覆盖。'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepHistory', limit: 10 }) }, '读取睡眠历史'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepRecover' }) }, '恢复中断批次'),
+                h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                    onClick: () => void run({ action: 'sleepStats' }) }, '读取审计容量'),
+                stats ? h('p', { role: 'status' }, `审计 ${stats.batchCount} 个批次，JSON 内容 ${stats.retainedBytes.toLocaleString()} 字节（${(stats.retainedBytes / 1048576).toFixed(2)} MiB）；${stats.maxBytes ? `上限 ${(stats.maxBytes / 1048576).toFixed(2)} MiB` : '未设容量上限'}。`) : null,
+                history ? h('div', null,
+                    h('p', null, `共 ${history.total} 个批次`),
+                    history.items.map((batch) => h('div', { key: batch.id },
+                        h('p', null, `${formatRuntimeTime(batch.createdAt)} · ${batch.report.operation === 'wake' ? '记忆唤醒 · ' : ''}${{ prepared: '待恢复', applied: '已完成', 'rolling-back': '回滚待恢复', 'rolled-back': '已回滚' }[batch.state]} · 修改 ${batch.changedCount} 条`),
+                        h('code', null, batch.id),
+                        h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy,
+                            onClick: () => void run({ action: 'sleepHistory', batchId: batch.id, limit: 5 }) }, '查看修改'),
+                        batch.state === 'applied' ? h('button', { type: 'button', className: 'sm-btn sm-btn-outline', disabled: busy,
+                            onClick: () => void run({ action: 'sleepRollback', batchId: batch.id }) }, '预演回滚') : null)),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || history.offset === 0,
+                        onClick: () => void run({ action: 'sleepHistory', offset: Math.max(0, history.offset - 10), limit: 10 }) }, '上一页'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || history.offset + history.limit >= history.total,
+                        onClick: () => void run({ action: 'sleepHistory', offset: history.offset + 10, limit: 10 }) }, '下一页')) : null,
+                detail?.items[0] ? h('div', null,
+                    h('p', null, `批次修改 ${detail.offset + 1} 起，共 ${detail.items[0].totalChanges} 条`),
+                    detail.items[0].changes.map((change) => h('details', { key: change.id },
+                        h('summary', null, change.id),
+                        h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+                            JSON.stringify({ before: change.before, after: change.after }, null, 2)))),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || detail.offset === 0,
+                        onClick: () => void run({ action: 'sleepHistory', batchId: detail.items[0].id, offset: Math.max(0, detail.offset - 5), limit: 5 }) }, '上一组修改'),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-quiet', disabled: busy || detail.offset + detail.limit >= detail.items[0].totalChanges,
+                        onClick: () => void run({ action: 'sleepHistory', batchId: detail.items[0].id, offset: detail.offset + 5, limit: 5 }) }, '下一组修改')) : null,
+                plan ? h('div', { role: 'status' },
+                    h('p', null, `将恢复 ${plan.restoredCount} 条原记录，停用 ${plan.invalidatedCount} 条新概要。`),
+                    h('button', { type: 'button', className: 'sm-btn sm-btn-primary', disabled: busy,
+                        onClick: () => void run({ action: 'sleepRollback', batchId: plan.batchId, dryRun: false, planToken: plan.planToken }) }, '确认回滚')) : null,
                 message ? h('p', { role: 'status' }, message) : null);
         }
 
@@ -1113,7 +1532,10 @@ window.__ModuleLoader__.load({
           const title = report.dryRun === true ? t('sleep-memory.sleep.previewDone') : t('sleep-memory.sleep.done');
           const phases = [
             t('sleep-memory.sleep.phase.consolidate', { n: report.consolidatedCount ?? 0 }),
+            ...(report.reconsolidatedCount !== undefined ? [`再巩固 ${report.reconsolidatedCount}`] : []),
+            ...(report.reconsolidationSkippedCount ? [`再巩固跳过 ${report.reconsolidationSkippedCount}`] : []),
             t('sleep-memory.sleep.phase.archive', { n: report.archivedCount ?? 0 }),
+            ...(report.dormantCount !== undefined ? [`进入休眠 ${report.dormantCount}`] : []),
             t('sleep-memory.sleep.phase.forget', { n: report.deletedCount ?? 0 }),
             t('sleep-memory.sleep.phase.rem', { n: report.edgesAdded ?? 0 }),
             t('sleep-memory.sleep.phase.decay', { n: report.decayedCount ?? 0 }),
@@ -1179,7 +1601,7 @@ window.__ModuleLoader__.load({
 
         /** 运行详情区分持久调度与本次加载计数，零计数默认收起。 */
         function RuntimeStatus({ state, error, sleeping }) {
-          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review]
+          const hasActivity = state && [state.scoring, state.expansion, state.injection, state.learning, state.review, state.recallEvidence]
             .some((counters) => Object.values(counters ?? {}).some((value) => value > 0));
           const infoRow = (label, value) => h('div', { key: label }, h('dt', null, label), h('dd', null, value));
           const counterRow = (label, value) => h('tr', { key: label }, h('th', { scope: 'row' }, label), h('td', null, value));
@@ -1194,6 +1616,28 @@ window.__ModuleLoader__.load({
               state.schedule?.lastError ? h('p', { className: 'sm-runtime-error', role: 'alert' },
                 `调度失败：${state.schedule.lastError} · 连续失败 ${state.schedule.failures} 次`) : null,
               state.lastSleepError ? h('p', { className: 'sm-runtime-error', role: 'alert' }, `最近整理失败：${state.lastSleepError.message}`) : null,
+              h('details', null,
+                h('summary', null, '最近召回结果'),
+                ...(state.metrics?.recentRecalls ?? []).slice().reverse().map((trace, index) => h('div', { key: index },
+                  h('p', null, `${formatRuntimeTime(trace.at)} · ${trace.mode === 'automatic' ? '自动注入' : '显式检索'} · 候选 ${trace.candidateCount} · 通过 ${trace.approvedCount ?? 0} · 返回 ${trace.returnedIds.length} · ${trace.durationMs} 毫秒`),
+                  trace.diagnostics?.reviewDurationMs !== undefined ? h('p', null,
+                    `审核 ${trace.diagnostics.reviewDurationMs} 毫秒 · ${{
+                      hit: '复用已完成审核', miss: '重新请求审核', disabled: '审核缓存已关闭',
+                      'no-session': '无稳定会话，未使用缓存', 'not-stored': '审核未完成，未缓存', 'not-used': '本次无需审核',
+                    }[trace.diagnostics.reviewCache]}`) : null,
+                  trace.diagnostics ? h('p', null, Object.entries(trace.diagnostics.reasons).map(([reason, count]) =>
+                    `${{
+                      'empty-store': '记忆库为空', 'no-eligible': '没有符合范围的记忆', 'no-query-terms': '缺少有效查询词',
+                      'no-match': '候选未命中', inactive: '记忆已失效或已巩固', scope: '项目范围不符',
+                      layer: '层级不符', time: '时间不符', dormant: '休眠条件未触发', 'entity-conflict': '精确实体冲突',
+                      duplicate: '重复注入已跳过', reentry: '同一消息重复进入', disabled: '自动注入已关闭',
+                      'review-rejected': '审核拒绝', 'review-timeout': '审核超时', 'review-failed': '审核调用或响应失败',
+                      'review-cancelled': '审核已取消', cancelled: '任务已取消', 'scope-changed': '项目范围已改变',
+                      'version-changed': '记忆版本已改变', 'turn-changed': '用户轮次已改变', 'count-budget': '条数预算不足', 'char-budget': '字符预算不足',
+                      'token-budget': 'Token 预算不足', 'path-rejected': '关联路径未通过', 'audit-capacity': '审计容量不足',
+                      'write-failed': '呈现前写入失败', 'pipeline-failed': '召回处理失败',
+                      'preference-overridden': '当前要求覆盖或偏好待裁决', 'outcome-changed': '结果反馈或证据已变化',
+                    }[reason] ?? reason} ${count}`).join('；') || '已通过本次筛选') : null))),
               h('div', { className: 'sm-runtime-counts' },
                 h('h3', null, '本次加载'),
                 h('p', { className: 'sm-runtime-note' }, hasActivity ? '以下计数仅统计本次加载。' : '本次加载暂无运行记录。'),
@@ -1205,8 +1649,24 @@ window.__ModuleLoader__.load({
                       counterRow('情绪评分', `已尝试 ${state.scoring?.attempted ?? 0} 次，写入 ${state.scoring?.stored ?? 0} 条，跳过 ${state.scoring?.skipped ?? 0} 次，失败 ${state.scoring?.failed ?? 0} 次`),
                       counterRow('自主学习', `写入 ${state.learning?.stored ?? 0} 条，重复 ${state.learning?.duplicates ?? 0} 条，待复核 ${state.learning?.reviewRequired ?? 0} 条，失败 ${state.learning?.failed ?? 0} 次；${state.learning?.lastReason ?? '尚未运行'}`),
                       counterRow('召回审核', `通过 ${state.review?.accepted ?? 0} 条，拒绝 ${state.review?.rejected ?? 0} 条，失败 ${state.review?.failed ?? 0} 次；${state.review?.lastReason ?? '尚未运行'}`),
+                      counterRow('审核等待与缓存', `上限 ${state.recallReviewTimeoutMs ?? 0} 毫秒 · 超时 ${state.review?.timeouts ?? 0} 次 · 缓存命中 ${state.review?.cache?.hits ?? 0} 次 · 未命中 ${state.review?.cache?.misses ?? 0} 次 · 保留 ${state.review?.cache?.entries ?? 0} 项`),
                       counterRow('查询扩展', `成功 ${state.expansion?.succeeded ?? 0} 次，失败或不可用 ${state.expansion?.failed ?? 0} 次`),
-                      counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`))))))
+                      counterRow('自动注入', `注入 ${state.injection?.injected ?? 0} 条，重复跳过 ${state.injection?.duplicateSkipped ?? 0} 次，预算跳过 ${state.injection?.budgetSkipped ?? 0} 次`),
+                      counterRow('本地分词缓存', `复用 ${state.searchIndex?.reused ?? 0} 条，重建 ${state.searchIndex?.rebuilt ?? 0} 条，缓存 ${state.searchIndex?.cached ?? 0} 条`),
+                      counterRow('本地检索规划', `${state.recallPlanMode ?? 'off'}；原候选 ${state.recallPlan?.last?.originalIds.length ?? 0} 条，规划候选 ${state.recallPlan?.last?.plannedIds.length ?? 0} 条`),
+                      counterRow('持久反馈', `呈现 ${state.feedback?.exposures ?? 0} 条，反馈事件 ${state.feedback?.events ?? 0} 条，呈现保存失败 ${state.feedback?.failed ?? 0} 次；${state.feedback?.lastError ?? '无保存错误'}`),
+                      ...Object.entries(state.metrics?.models ?? {}).map(([stage, usage]) => counterRow(
+                        { learning: '学习 Token', review: '审核 Token', expansion: '扩展 Token', scoring: '评分 Token', narrative: '叙述 Token' }[stage],
+                        `模型实报 ${usage.reported.totalTokens}（缓存读取 ${usage.reported.cacheReadTokens}）；未实报调用估算 ${usage.estimated.totalTokens}；调用 ${usage.calls} 次，失败 ${usage.failed} 次，累计 ${usage.durationMs} 毫秒`)),
+                      counterRow('注入 Token 估算', `${state.metrics?.injection.estimatedTokens ?? 0}；对应完整正文估算 ${state.metrics?.injection.sourceEstimatedTokens ?? 0}`),
+                      counterRow('按需证据读取', `${state.metrics?.evidence.reads ?? 0} 次，输出估算 ${state.metrics?.evidence.estimatedTokens ?? 0} Token`),
+                      counterRow('逐层取证', `${state.progressiveRecallEnabled ? '已开启' : '已关闭'}；请求 ${state.recallEvidence?.requests ?? 0} 次，返回 ${state.recallEvidence?.returned ?? 0} 条，预算计入 ${state.recallEvidence?.estimatedTokens ?? 0} Token`),
+                      ...(Object.entries(state.recallEvidence?.rejected ?? {}).map(([reason, count]) => counterRow(`取证拒绝：${{
+                        invalid_args: '参数无效', disabled: '功能关闭', evidence_expired: '轮次失效',
+                        evidence_not_offered: '尚未呈现', evidence_scope_changed: '范围变化', evidence_changed: '版本变化',
+                        evidence_depth_limit: '深度上限', evidence_complete: '已展开', evidence_budget_exhausted: '预算用尽',
+                      }[reason] ?? reason}`, `${count} 次`))),
+                      counterRow('显式检索', `${state.metrics?.retrieval.queries ?? 0} 次，空结果 ${state.metrics?.retrieval.empty ?? 0} 次，累计 ${state.metrics?.retrieval.durationMs ?? 0} 毫秒，输出估算 ${state.metrics?.retrieval.estimatedTokens ?? 0} Token`))))))
               : !error ? h('p', { className: 'sm-runtime-note', role: 'status' }, '正在读取运行状态…') : null);
         }
 
@@ -1462,21 +1922,31 @@ window.__ModuleLoader__.load({
 
               h(MemoryDialog, { id: 'sm-manager', title: '记忆管理', open: managementView !== null, onClose: () => setManagementView(null) },
                 h('div', { className: 'sm-manager-tabs', role: 'group', 'aria-label': '记忆管理分类' },
-                  [['status', '运行详情'], ['scope', '会话范围'], ['backup', '备份恢复']].map(([key, label]) =>
+                  [['status', '运行详情'], ['scope', '会话范围'], ['backup', '备份恢复'], ['audit', '睡眠审计']].map(([key, label]) =>
                     h('button', { key, type: 'button', className: 'sm-btn sm-btn-quiet', 'aria-pressed': managementView === key,
                       'aria-controls': `sm-manager-${key}`, onClick: () => setManagementView(key) }, label))),
                 h('div', { id: 'sm-manager-status', hidden: managementView !== 'status' }, h(RuntimeStatus, { ...runtime, sleeping })),
                 h('div', { id: 'sm-manager-scope', hidden: managementView !== 'scope' }, h(ScopePanel)),
                 h('div', { id: 'sm-manager-backup', hidden: managementView !== 'backup' },
-                  h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } }))),
+                  h(BackupPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } })),
+                managementView === 'audit' ? h('div', { id: 'sm-manager-audit' },
+                  h(SleepAuditPanel, { onChanged: () => { void loadPage(0, false); reloadStats(); reloadEdges(); } })) : null),
               h(Toast, { toast })));
         }
 
         // ---- bundle detail page inline config (plugins.bundle.config) --------
 
         const CONFIG_FIELD_ORDER = ['injectEnabled', 'recallBudget', 'injectBudget', 'sleepIntervalMinutes', 'salientScoringEnabled', 'sleepOnStart', 'projectId',
-          'injectMaxTotalChars', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
-          'autoLearnEnabled', 'recallReviewEnabled', 'semanticRecallEnabled'];
+          'injectMaxTotalChars', 'injectMaxEstimatedTokens', 'injectRepeatAfterTurns', 'salientDecayHalfLifeDays', 'salientReviewAfterDays',
+          'autoLearnEnabled', 'recallReviewEnabled', 'recallDiagnosticsEnabled', 'semanticRecallEnabled',
+          'recallReviewTimeoutMs', 'recallReviewCacheSeconds',
+          'narrativeEnabled', 'narrativeTimeoutMs',
+          'progressiveRecallEnabled', 'recallEvidenceMaxDepth', 'recallEvidenceMaxNodes', 'recallEvidenceMaxEstimatedTokens',
+          'sleepAuditEnabled', 'contextualRecallEnabled',
+          'sleepAuditMaxBytes',
+          'dormancyEnabled', 'reconsolidationEnabled', 'deepDecayHalfLifeDays', 'archiveDecayHalfLifeDays', 'dormantAfterDays', 'dormantStrengthLine',
+          'preferenceRecallEnabled', 'outcomeRecallEnabled',
+          'recallPlanMode', 'learningPolicyMode', 'feedbackEnabled', 'feedbackRankingEnabled'];
 
         /** Initial free-typing drafts: booleans stay booleans, numbers become raw strings. */
         function configDraftFrom(fields) {
@@ -1491,11 +1961,11 @@ window.__ModuleLoader__.load({
           return draft;
         }
 
-        /** Whole-number parse clamped by the field's range; null when invalid. */
+        /** 数字按字段声明解析并保持服务端范围约束。 */
         function configParseNumber(raw, field) {
-          if (!/^-?\d+$/.test(raw)) return null;
+          if (!(field.type === 'number' ? /^-?\d+(?:\.\d+)?$/ : /^-?\d+$/).test(raw)) return null;
           const parsed = Number(raw);
-          if (!Number.isSafeInteger(parsed) || parsed < field.min || parsed > field.max) return null;
+          if (!Number.isFinite(parsed) || (field.type !== 'number' && !Number.isSafeInteger(parsed)) || parsed < field.min || parsed > field.max) return null;
           return parsed;
         }
 
@@ -1597,15 +2067,38 @@ window.__ModuleLoader__.load({
           for (const [key, label, hint] of [
             ['autoLearnEnabled', '自主学习有用信息', '完成对话后后台提取有来源的事实和经验；冲突内容标记待复核'],
             ['recallReviewEnabled', '召回相关性审核', '注入前检查是否有助于当前任务；审核失败则跳过本轮注入'],
+            ['recallDiagnosticsEnabled', '召回阶段诊断', '保存最近 20 次的阶段计数和原因；不保存问题与记忆正文'],
+            ['preferenceRecallEnabled', '长期表达偏好应用', '普通任务按需使用语言、详略和格式偏好；当前明确要求优先'],
+            ['outcomeRecallEnabled', '结果激励与警示', '需开启反馈记录；按用户确认的结果证据提醒同类情境，反例与撤回可改变提示'],
+            ['narrativeEnabled', '可选叙述实验', '默认关闭；原文弹窗按需生成模型反思，用户核对后保存独立解释版本'],
             ['semanticRecallEnabled', '同义查询扩展', '额外调用模型生成检索词，帮助找回不同表达的记忆'],
+            ['feedbackEnabled', '记录召回与用户反馈', '按呈现版本保存反馈；曝光次数不代表认可'],
+            ['feedbackRankingEnabled', '反馈参与排序', '需同时开启反馈记录；仅调整同查询、同范围和同版本的候选'],
             ['salientScoringEnabled', '自动情绪评分', '模型推断会单独标记；关闭不影响已有记忆'],
             ['sleepOnStart', '加载时按期补跑', '首次或超过睡眠间隔时补跑；未到期不重复执行'],
+            ['sleepAuditEnabled', '睡眠审计与回滚', '保留批次修改证据并暂停物理遗忘；可在记忆管理中预演回滚'],
+            ['contextualRecallEnabled', '情境触发召回', '使用记忆中的具体情境短语补充候选；仍经过相关性审核与预算检查'],
+            ['dormancyEnabled', '深层记忆休眠', '需同时开启睡眠审计；长期低强度记忆通过情境或关联路径唤醒'],
+            ['reconsolidationEnabled', '深层概要再巩固', '需同时开启睡眠审计；新证据或来源纠正可生成保留历史的新概要'],
+            ['progressiveRecallEnabled', '按需逐层取证', '模型读到概要后可主动展开来源；同轮共享预算且不强化记忆'],
           ]) {
             if (!fields[key]) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
               h('span', { className: 'sm-config-label' }, label),
               h('input', { type: 'checkbox', disabled: busy, checked: parsed[key] === true, onChange: () => setBoolean(key) }),
               h('span', { className: 'sm-config-hint' }, hint),
+              fields[key].overridden ? resetButton(key) : null));
+          }
+          for (const [key, label, options] of [
+            ['recallPlanMode', '本地检索规划', [['off', '原流程'], ['shadow', '影子对照'], ['local', '本地规划']]],
+            ['learningPolicyMode', '自主学习策略', [['current', '当前策略'], ['evidence', '证据与持久去重']]],
+          ]) {
+            if (!fields[key]) continue;
+            rows.push(h('label', { className: 'sm-config-row', key },
+              h('span', { className: 'sm-config-label' }, label),
+              h('select', { className: 'sm-select', disabled: busy, value: String(draft[key] ?? fields[key].value),
+                onChange: (event) => setNumber(key, event.target.value) },
+              options.map(([value, text]) => h('option', { key: value, value }, text))),
               fields[key].overridden ? resetButton(key) : null));
           }
           if (fields.projectId) rows.push(h('label', { className: 'sm-config-row', key: 'projectId' },
@@ -1641,16 +2134,28 @@ window.__ModuleLoader__.load({
           }
           for (const [key, label, hint] of [
             ['injectMaxTotalChars', '注入总字符预算', '包含标题、来源和关联内容，超过预算的条目不注入'],
+            ['injectMaxEstimatedTokens', '注入 Token 估算预算', '与字符预算同时生效，估算不等于模型计费 Token'],
             ['injectRepeatAfterTurns', '重复注入间隔', '相同会话与范围内间隔多少轮允许再次注入，0 为关闭去重'],
+            ['recallReviewTimeoutMs', '召回审核等待上限', '单位为毫秒，默认 15000；超时跳过注入，已有显式配置优先'],
+            ['narrativeTimeoutMs', '叙述单次调用时限', '单位为毫秒，生成与复核分别计时；默认 15000，最多 60000'],
+            ['recallReviewCacheSeconds', '审核结果缓存时长', '单位为秒，0 关闭；仅同会话、问题、模型和候选版本一致时复用，最多 128 项'],
+            ['recallEvidenceMaxDepth', '取证深度上限', '以本轮呈现的概要为起点，最多沿来源展开多少层'],
+            ['recallEvidenceMaxNodes', '取证来源条数', '同轮多个概要共同使用，重复来源只计一次'],
+            ['recallEvidenceMaxEstimatedTokens', '取证 Token 估算预算', '累计计算成功工具响应的正文、路径和计数，独立于首次注入预算'],
             ['salientDecayHalfLifeDays', '显著经历衰减半衰期', '单位为天，0 为关闭；建议长于普通记忆'],
             ['salientReviewAfterDays', '显著经历复核期限', '单位为天，0 为关闭；到期后在睡眠时转为待复核'],
+            ['sleepAuditMaxBytes', '审计内容容量上限', '单位为字节，0 表示不限；达到上限后暂停新增睡眠批次且保留已有证据'],
+            ['deepDecayHalfLifeDays', '深层衰减半衰期', '单位为天，0 沿用普通半衰期；较大值使深层记忆衰减更慢'],
+            ['archiveDecayHalfLifeDays', '归档衰减半衰期', '单位为天，0 沿用普通半衰期'],
+            ['dormantAfterDays', '休眠闲置期限', '单位为天，达到期限且强度低于阈值才进入休眠'],
+            ['dormantStrengthLine', '休眠强度阈值', '0 至 1；休眠保留原文、有效性和巩固关系'],
           ]) {
             const field = fields[key];
             if (!field) continue;
             rows.push(h('label', { className: 'sm-config-row', key },
               h('span', { className: 'sm-config-label' }, label),
               h('input', {
-                type: 'number', className: 'sm-search sm-config-num', min: field.min, max: field.max, step: 1,
+                type: 'number', className: 'sm-search sm-config-num', min: field.min, max: field.max, step: field.type === 'number' ? 0.01 : 1,
                 value: String(draft[key] ?? ''), disabled: busy, 'aria-label': label,
                 onChange: (event) => setNumber(key, event.target.value),
               }),

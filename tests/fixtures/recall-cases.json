@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "description": "用户案例保留原始问题；构造用例覆盖检索边界与已知词面漏召回。",
+  "records": [
+    { "id": "smm_proxy", "content": "GitHub 网络 HTTPS Git 失败，代理 127.0.0.1:7897 不可用，可在 SSH 443 通道排障。", "keywords": ["GitHub", "代理", "SSH"] },
+    { "id": "smm_enroll", "projectId": "exam", "content": "enroll 的逻辑删除字段 del_flag 统一为 0 存在、1 删除。", "keywords": ["报名", "逻辑删除", "删除标识"] },
+    { "id": "smm_theme", "content": "用户偏好深色主题并减少动画。", "keywords": ["主题", "深色"] },
+    { "id": "smm_db244", "projectId": "exam", "content": "dm-244 是开发数据库节点，表结构核对使用只读连接。" },
+    { "id": "smm_db245", "projectId": "other", "content": "dm-245 是测试数据库节点，表结构核对使用只读连接。" },
+    { "id": "smm_dm8", "projectId": "exam", "content": "本项目数据库使用 DM8，迁移通过 Liquibase 执行。" },
+    { "id": "smm_other_db", "projectId": "other", "content": "其他项目数据库使用 PostgreSQL。" },
+    { "id": "smm_port443", "projectId": "exam", "content": "网关监听端口 443。" },
+    { "id": "smm_port8443", "projectId": "exam", "content": "管理服务监听端口 8443。" },
+    { "id": "smm_http404", "projectId": "exam", "content": "HTTP 状态码 404 表示资源不存在，应检查路由。" },
+    { "id": "smm_version11", "projectId": "exam", "content": "Spring Boot 3.2.11 的配置已经验证。" },
+    { "id": "smm_version12", "projectId": "exam", "content": "Spring Boot 3.2.12 的配置仅用于其他环境。" },
+    { "id": "smm_path", "projectId": "exam", "content": "配置文件位于 /srv/exam/config.yml。" },
+    { "id": "smm_other_path", "projectId": "exam", "content": "旧配置文件位于 /srv/other/config.yml。" },
+    { "id": "smm_login", "projectId": "exam", "content": "JWT 续期通过 refresh_token 完成。" },
+    { "id": "smm_review", "projectId": "exam", "content": "灰度发布必须核对备份恢复步骤。", "lifecycle": { "state": "review", "reason": "发布条件变化", "at": 1, "revision": 1 } },
+    { "id": "smm_invalid", "projectId": "exam", "content": "废止方案使用 RETIRED_BUILD_99。", "lifecycle": { "state": "invalid", "reason": "旧构建方案废止", "at": 1, "revision": 1 } },
+    {
+      "id": "smm_release",
+      "projectId": "exam",
+      "content": "发布复盘的背景记录用于保留当时的环境和判断依据。首次演练时先准备备份并验证备份能够还原，随后记录迁移前后的数据量和关键索引状态。值班人员先检查配置差异并登记审核结果，发布负责人确认演练环境与目标环境的差异。测试人员分别核对正常写入、重复提交和异常中断的处理结果，只有验收结果满足约定才继续发布。每个操作步骤都由执行人登记开始时刻和完成时刻，出现阻塞时应先说明现场事实并保持现有证据。复盘时保留成功步骤与失败尝试的区别，失败尝试不能被当成以后直接复用的方法。已经废止的临时方案另行标明原因与替代记录，当前有效的操作仍以核对后的发布流程为准。文档中的目录和日志名称只描述当时的现场，不应直接覆盖新环境的配置。执行人将问题按可复现条件归类并写清输入和结果，方便以后判断经验是否适用于当前任务。数据检查先比较业务总量再核对具体记录，发现差异时逐项保留证据并确认影响范围。恢复演练需要记录还原后的状态与后续验证结果，不能只凭备份文件存在就判定恢复可靠。验收材料中的截图应能对应到具体操作步骤与时间段，避免把无关环境的结果混入当前结论。只有考试平台正式发布时才启用 RELEASE_FLAG_42，其他环境保持关闭并先验证备份恢复。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "user-enroll-proxy-noise",
+      "source": "user-provided",
+      "query": "排查下enroll的删除标识,当前项目规范del_flag 0存在1删除,",
+      "projectId": "exam",
+      "expected": ["smm_enroll"],
+      "note": "用户截图中的误召回问题，网络经验不相关。"
+    },
+    {
+      "id": "user-database-monitor",
+      "source": "user-provided",
+      "query": "表建过了,你可以连dbx的mcp去dm-244看监测下",
+      "projectId": "exam",
+      "expected": ["smm_db244"],
+      "note": "沿用已保留的用户问题回归用例。"
+    },
+    { "id": "digits-only", "source": "constructed", "query": "0 1 127 7897", "projectId": "exam", "expected": [] },
+    { "id": "generic-only", "source": "constructed", "query": "检查当前项目的相关规范", "projectId": "exam", "expected": [] },
+    { "id": "unrelated", "source": "constructed", "query": "火星探测器轨道椭圆率", "projectId": "exam", "expected": [] },
+    { "id": "project-isolation", "source": "constructed", "query": "PostgreSQL", "projectId": "exam", "expected": [] },
+    { "id": "global-isolation", "source": "constructed", "query": "DM8", "projectId": null, "expected": [] },
+    { "id": "global-preference", "source": "constructed", "query": "深色主题", "projectId": "exam", "expected": ["smm_theme"] },
+    { "id": "exact-db", "source": "constructed", "query": "DM8", "projectId": "exam", "expected": ["smm_dm8"] },
+    { "id": "migration", "source": "constructed", "query": "Liquibase", "projectId": "exam", "expected": ["smm_dm8"] },
+    { "id": "exact-device", "source": "constructed", "query": "dm-244", "projectId": "exam", "expected": ["smm_db244"] },
+    { "id": "exact-field", "source": "constructed", "query": "del_flag", "projectId": "exam", "expected": ["smm_enroll"] },
+    { "id": "port-role", "source": "constructed", "query": "443端口", "projectId": "exam", "includeGlobal": false, "expected": ["smm_port443"] },
+    { "id": "http-role", "source": "constructed", "query": "HTTP404 错误", "projectId": "exam", "expected": ["smm_http404"] },
+    { "id": "version", "source": "constructed", "query": "Spring Boot 3.2.11", "projectId": "exam", "expected": ["smm_version11"] },
+    { "id": "path", "source": "constructed", "query": "/srv/exam/config.yml", "projectId": "exam", "expected": ["smm_path"] },
+    { "id": "review-state", "source": "constructed", "query": "灰度发布", "projectId": "exam", "expected": [], "explicitExpected": ["smm_review"] },
+    { "id": "invalid-state", "source": "constructed", "query": "RETIRED_BUILD_99", "projectId": "exam", "expected": [] },
+    { "id": "long-record-tail", "source": "constructed", "query": "RELEASE_FLAG_42", "projectId": "exam", "expected": ["smm_release"], "requiredText": "RELEASE_FLAG_42" },
+    { "id": "synonym-keywords", "source": "constructed", "query": "报名逻辑删除", "projectId": "exam", "expected": ["smm_enroll"] },
+    { "id": "semantic-gap-login", "source": "constructed", "query": "登录过期以后如何延长会话", "projectId": "exam", "expected": ["smm_login"], "knownGap": "词面检索缺少登录过期与 JWT 续期的语义关联。" },
+    { "id": "semantic-gap-db", "source": "constructed", "query": "关系型数据持久化选用哪家产品", "projectId": "exam", "expected": ["smm_dm8"], "knownGap": "词面检索缺少持久化选型与数据库产品的语义关联。" }
+  ]
+}

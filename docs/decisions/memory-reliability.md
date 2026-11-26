@@ -3,11 +3,14 @@ id: sleep-memory.decisions.reliability
 title: 记忆可靠性与产品完善计划
 type: decision
 status: active
-updated: 2026-11-09
+owner: maintainer
+updated: 2026-11-17
 source_of_truth: code-and-decision
 ---
 
 # 记忆可靠性与产品完善计划
+
+2026-11-17 的检索与学习增强见 [本地检索与学习闭环](memory-local-learning.md)，用户已确认保持不外接嵌入模型。
 
 ## 目录
 
