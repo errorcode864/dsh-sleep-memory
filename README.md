@@ -126,6 +126,7 @@ profile 的依赖名和 `dsh.profile.bundles` 使用 `dsh-sleep-memory`，
 npm test       # smoke 场景 + 可靠性与客户端契约测试
 npm run eval   # 确定性检索场景，不调用真实 LLM
 npm run bench:capacity -- --sizes 1000 --profiles short,long,dense # 容量验证
+npm run bench:retrieval -- --size 1000 --profile varied # 不同长正文的冷暖索引对照
 ```
 
 容量测试分别报告内存替身与真实宿主磁盘结果，参数和边界见[容量验证](docs/decisions/memory-capacity.md)。

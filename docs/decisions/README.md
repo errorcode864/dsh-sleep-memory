@@ -4,7 +4,7 @@ title: 设计与实施决策
 type: index
 status: active
 owner: maintainer
-updated: 2026-11-25
+updated: 2026-11-26
 source_of_truth: decision
 ---
 
@@ -44,7 +44,7 @@ source_of_truth: decision
 | decision | [睡眠审计与情境触发](memory-contextual-audit.md) | active | 2026-11-17 |
 | decision | [审计容量与备份恢复](memory-audit-backup.md) | active | 2026-11-20 |
 | decision | [分层衰减、休眠与偏好召回](memory-dormancy.md) | active | 2026-11-20 |
-| decision | [休眠之后的开发路线](memory-next-plan.md) | draft | 2026-11-25 |
+| decision | [休眠之后的开发路线](memory-next-plan.md) | draft | 2026-11-26 |
 | decision | [召回诊断与长期表达偏好](memory-recall-preferences.md) | active | 2026-11-20 |
 | decision | [多层来源追溯与审核时限验收](memory-source-tracing.md) | active | 2026-11-20 |
 | decision | [审核等待时限与短期结果缓存](memory-review-latency.md) | active | 2026-11-20 |
@@ -54,5 +54,5 @@ source_of_truth: decision
 | decision | [回忆细节收缩与原文对照](memory-recollection.md) | active | 2026-11-20 |
 | decision | [可选反思叙述与独立版本](memory-narrative.md) | active | 2026-11-20 |
 | decision | [叙述历史备份与跨域恢复](memory-narrative-backup.md) | active | 2026-11-25 |
-| decision | [长记录与密集关联容量验证](memory-capacity.md) | active | 2026-11-25 |
+| decision | [长记录与密集关联容量验证](memory-capacity.md) | active | 2026-11-26 |
 <!-- DOCS-INDEX:END -->

@@ -36,42 +36,50 @@ function createAnalysis() {
 }
 
 /** 相同词的原词与弱别名合并，保留最可靠的边界与有限词频。 */
-function addToken(analysis, type, value, weight, anchor = true, constraint) {
+function addToken(analysis, type, value, weight, anchor = true, constraint, count = 1) {
     if (!value) return
     const key = `${type}:${value}`
     const previous = analysis.tokens.get(key)
-    analysis.tokens.set(key, {
-        key, type, value, weight: Math.max(previous?.weight ?? 0, weight),
-        anchor: anchor || previous?.anchor === true, count: Math.min(8, (previous?.count ?? 0) + 1),
-    })
+    if (previous) {
+        previous.weight = Math.max(previous.weight, weight)
+        previous.anchor ||= anchor
+        previous.count = Math.min(8, previous.count + count)
+    }
+    if (!previous) analysis.tokens.set(key, { key, type, value, weight, anchor, count: Math.min(8, count) })
     if (constraint) {
         if (!analysis.constraints.has(constraint)) analysis.constraints.set(constraint, new Set())
         analysis.constraints.get(constraint).add(value)
     }
 }
 
-function addWord(analysis, word, weight = 1) {
+function addWord(analysis, word, weight = 1, count = 1) {
     const normalized = word.toLowerCase()
     if (STOP_WORDS.has(normalized)) return
     const generic = GENERIC_WORDS.has(normalized)
-    addToken(analysis, 'word', normalized, generic ? 0.15 : weight, !generic)
+    addToken(analysis, 'word', normalized, generic ? 0.15 : weight, !generic, undefined, count)
 }
 
 /** 中文使用词边界生成词与相邻短语；弱碎片只来自词内，不跨越词边界。 */
 function addChinese(analysis, text) {
+    // 同一字段片段内相同汉字段只分词一次，计数仍逐项累加并沿用上限。
+    const runs = new Map()
     for (const run of text.matchAll(/\p{Script=Han}+/gu)) {
-        const words = [...WORD_SEGMENTER.segment(run[0])].filter((item) => item.isWordLike).map((item) => item.segment)
+        runs.set(run[0], (runs.get(run[0]) ?? 0) + 1)
+    }
+    for (const [run, count] of runs) {
+        const words = []
+        for (const item of WORD_SEGMENTER.segment(run)) if (item.isWordLike) words.push(item.segment)
         for (let index = 0; index < words.length; index++) {
             const word = words[index]
             if (STOP_WORDS.has(word)) continue
-            addWord(analysis, word)
+            addWord(analysis, word, 1, count)
             // 显式单字查询可回查词内细节，自动注入不能只靠这些碎片成立。
             for (const char of word) {
-                if (!STOP_WORDS.has(char)) addToken(analysis, 'char', char, 0.08, false)
+                if (!STOP_WORDS.has(char)) addToken(analysis, 'char', char, 0.08, false, undefined, count)
             }
             if (word.length > 2) {
                 for (let offset = 0; offset < word.length - 1; offset++) {
-                    addToken(analysis, 'word', word.slice(offset, offset + 2), 0.12, false)
+                    addToken(analysis, 'word', word.slice(offset, offset + 2), 0.12, false, undefined, count)
                 }
             }
             if (GENERIC_WORDS.has(word)) continue
@@ -80,7 +88,7 @@ function addChinese(analysis, text) {
                 if (STOP_WORDS.has(words[next]) || GENERIC_WORDS.has(words[next])) break
                 phrase += words[next]
                 if (phrase.length > 10) break
-                addToken(analysis, 'word', phrase, 1.4)
+                addToken(analysis, 'word', phrase, 1.4, true, undefined, count)
             }
         }
     }
@@ -196,9 +204,7 @@ export function analyzeFields(fields) {
     for (const field of fields) {
         const part = analyzeRetrievalText(field)
         for (const token of part.tokens.values()) {
-            for (let count = 0; count < token.count; count++) {
-                addToken(analysis, token.type, token.value, token.weight, token.anchor)
-            }
+            addToken(analysis, token.type, token.value, token.weight, token.anchor, undefined, token.count)
         }
         for (const [group, values] of part.constraints) {
             if (!analysis.constraints.has(group)) analysis.constraints.set(group, new Set())

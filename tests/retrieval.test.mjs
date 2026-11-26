@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { analyzeRetrievalText, buildRetrievalIndex, retrievalTerms, scoreRetrieval } from '../memory-retrieval.js'
+import { analyzeFields, analyzeRetrievalText, buildRetrievalIndex, retrievalTerms, scoreRetrieval } from '../memory-retrieval.js'
 import { createHarness, createMessage, fixture, injectMessage } from './harness.mjs'
 
 const tokensOf = (text) => [...analyzeRetrievalText(text).tokens.values()]
@@ -137,6 +137,28 @@ test('正文与标签的边界不能合成不存在的数字语境或短语', ()
     assert.deepEqual(index.analyses.map((analysis) => [...analysis.constraints.keys()]), [[], []])
     const [first] = scoreRetrieval(buildRetrievalIndex([['删除', '标识']]), '除标', { automatic: true })
     assert.equal(first.score, 0)
+})
+
+test('重复汉字段合并后保持插入顺序、词频上限和强弱词权重', () => {
+    const runs = ['数据库迁移', '库迁移', '数据', '库迁移', '数据库迁移', '恢复演练', '数据']
+    const fields = [...runs, ...Array.from({ length: 20 }, () => '数据库迁移')]
+    const combined = analyzeRetrievalText(fields.join('，'))
+    const separate = analyzeFields(fields)
+    assert.deepEqual([...combined.tokens], [...separate.tokens])
+    assert.equal(combined.tokens.get('word:数据库').count, 8)
+    assert.equal(combined.tokens.get('word:数据').anchor, true)
+    assert.equal(combined.tokens.get('word:数据').weight, 1)
+    assert.equal(combined.tokens.get('char:据').anchor, false)
+})
+
+test('独立分词结果不能被后续计数或字段合并改写', () => {
+    const first = analyzeRetrievalText('数据迁移')
+    const snapshot = structuredClone(first)
+    const second = analyzeFields(['数据迁移'.repeat(30), '数据迁移', 'HTTP', '404'])
+    assert.deepEqual(first, snapshot)
+    assert.equal(first.tokens.get('word:数据').count, 1)
+    assert.equal(second.tokens.get('word:数据').count, 8)
+    assert.equal(second.constraints.has('status'), false)
 })
 
 test('无有效查询不会意外变成全库浏览，显式按层浏览仍可用', async () => {

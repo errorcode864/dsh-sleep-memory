@@ -21,6 +21,23 @@ test('分词缓存复用强化后的记录并按内容更新，同时只统计�
     assert.equal(cache.state.cached, 1)
 })
 
+test('标签和关键词原地变更会重建分词，保留集合变化不复用旧 ID', () => {
+    const record = fixture('smm_mutable', { content: '恢复演练', tags: ['发布'], keywords: ['node-a'] })
+    const cache = createLocalSearchIndex()
+    const first = cache.build([record])
+    record.tags[0] = '归档'
+    record.keywords[0] = 'node-b'
+    const updated = cache.build([record])
+    assert.equal(first.analyses[0].tokens.has('identifier:node-a'), true)
+    assert.equal(updated.analyses[0].tokens.has('identifier:node-a'), false)
+    assert.equal(updated.analyses[0].tokens.has('identifier:node-b'), true)
+    assert.equal(cache.state.rebuilt, 2)
+    cache.retain([])
+    assert.equal(cache.state.cached, 0)
+    assert.deepEqual(cache.build([record]), updated)
+    assert.equal(cache.state.rebuilt, 3)
+})
+
 test('术语别名限定项目和完整标识符边界', () => {
     const aliases = [
         { projectId: 'a', phrase: 'JWT', target: 'refresh_token' },

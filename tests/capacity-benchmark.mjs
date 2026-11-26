@@ -39,6 +39,8 @@ const report = {
 }
 report.scripts = Object.fromEntries(await Promise.all(['capacity-benchmark.mjs', 'capacity-worker.mjs', 'capacity-fixtures.mjs'].map(async (name) =>
     [name, createHash('sha256').update(await readFile(new URL(name, import.meta.url))).digest('hex')])))
+report.sources = Object.fromEntries(await Promise.all(['memory-retrieval.js', 'memory-search-index.js'].map(async (name) =>
+    [name, createHash('sha256').update(await readFile(new URL(`../${name}`, import.meta.url))).digest('hex')])))
 for (const size of sizes) {
     for (const profile of profiles) {
         const options = { size, profile, backend: values.backend, repeats }

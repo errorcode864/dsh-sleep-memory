@@ -6,6 +6,7 @@
     "eval": "node eval.mjs",
     "test:host": "node tests/host-integration.mjs",
     "bench:search": "node tests/search-benchmark.mjs",
+    "bench:retrieval": "node tests/retrieval-benchmark.mjs",
     "bench:capacity": "node tests/capacity-benchmark.mjs",
     "eval:model": "node tests/live-model-eval.mjs",
     "eval:preferences": "node tests/preference-eval.mjs",
